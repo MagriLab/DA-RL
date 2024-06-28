@@ -1,0 +1,10 @@
+numpy
+scipy
+jax
+jaxlib
+optax
+flax @ git+https://github.com/google/flax.git
+matplotlib
+gymnasium
+ml_collections
+wandb
