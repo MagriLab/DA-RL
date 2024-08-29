@@ -20,13 +20,16 @@ import numpy as np
 import orbax
 from flax.training import orbax_utils
 from gymnasium.wrappers import RecordEpisodeStatistics, TimeLimit
+from scipy import linalg
 
 import utils.file_processing as fp
 import utils.flags as myflags
 import wandb
 from ddpg import DDPG
 from envs.KS_environment import KSenv
+from envs.KS_solver import KS
 from replay_buffer import ReplayBuffer
+from utils import visualizations as vis
 
 # system config
 FLAGS = flags.FLAGS
@@ -41,13 +44,13 @@ flags.DEFINE_bool(
     "Use --save_checkpoints to save intermediate model weights.",
 )
 _CONFIG = config_flags.DEFINE_config_file(
-    "config", "configs/config.py", "Contains configs to run the experiment"
+    "config", "configs/enKF_config.py", "Contains configs to run the experiment"
 )
 _WANDB = config_flags.DEFINE_config_file(
     "wandb_config", "configs/wandb_config.py", "Contains configs to log to wandb."
 )
 _ENV = config_flags.DEFINE_config_file(
-    "env_config", None, "Contains configs for the environment."
+    "env_config", "configs/KS_config.py", "Contains configs for the environment."
 )
 
 # flags.mark_flags_as_required(['config'])
@@ -75,17 +78,40 @@ def add_gaussian_noise(key, x, stddev):
     return x + noise
 
 
-def evaluate(config, env, actor, params):
+def evaluate(config, env, actor, params, model, obs_mat):
     # if env in jax, vmap over eval_episodes and jax.lax.scan over episode_steps
     last_reward_arr = []
     for _ in range(config.eval_episodes):
-        state, _ = env.reset()
+        _, _ = env.reset()
+        # initialize enKF
+        state_ens = initialize_ensemble(
+            env, model, env.unwrapped.u, config.enKF.std_init, config.enKF.m
+        )
+        state = ensemble_to_state(state_ens)
+
         terminated = False
         truncated = False
         while not terminated and not truncated:
             # get action from the target actor network
             action = actor.apply(params, state)
-            state, reward, terminated, truncated, _ = env.step(action)
+            obs, reward, terminated, truncated, _ = env.step(action)
+
+            # define observation covariance matrix
+            obs_cov = (
+                np.diag((config.enKF.std_obs * np.ones(len(obs))))
+                * np.max(abs(obs), axis=0) ** 2
+            )
+
+            # add noise on the observation
+            obs = np.random.multivariate_normal(obs, obs_cov)
+
+            # forecast
+            state_ens = forecast(model, state_ens, action)
+
+            # apply enkf
+            state_ens = apply_enKF(model, state_ens, obs, obs_cov, obs_mat)
+            state = ensemble_to_state(state_ens)
+
         last_reward_arr.append(reward)
 
     return_queue = np.asarray(env.return_queue).flatten()[-config.eval_episodes :]
@@ -96,107 +122,192 @@ def evaluate(config, env, actor, params):
     return average_return, average_reward, average_last_reward
 
 
-def evaluate_KS_for_plotting(env, actor, params, eval_episodes=2):
-    # this should go in a different file
-    x = np.arange(env.unwrapped.N) * 2 * np.pi / env.unwrapped.N
+def evaluate_KS_for_plotting(env, actor, params, model, config, eval_episodes=1):
+    x = env.unwrapped.KS.x
+    x_obs = env.unwrapped.observation_locs
+    target = env.unwrapped.target
 
-    fig, axs = plt.subplots(
-        eval_episodes,
-        3,
-        width_ratios=[1, 0.55, 1],
-        figsize=(10, 3 * eval_episodes),
-        constrained_layout=True,
-    )
-
-    # fig2, axs2 = plt.subplots(
-    #     env.unwrapped.num_observations,
-    #     eval_episodes,
-    #     width_ratios=[1, 1],
-    #     figsize=(6 * eval_episodes, 10),
-    #     constrained_layout=True,
-    # )
-
+    full_obs_mat = get_observation_matrix(model, x)
+    obs_mat = get_observation_matrix(model, x_obs)
+    figs = []
     for i in range(eval_episodes):
-        state, _ = env.reset()
+        # initialize environment
+        true_obs, _ = env.reset()
         full_state = env.unwrapped.u
 
-        state_arr = np.array(state)
+        # initialize enKF
+        state_ens = initialize_ensemble(
+            env, model, full_state, config.enKF.std_init, config.enKF.m
+        )
+        state = ensemble_to_state(state_ens)
+
+        true_obs_arr = np.array(true_obs)
+        obs_arr = np.array(true_obs)
         full_state_arr = np.array(full_state)
         reward_arr = np.zeros((1,))
+        state_ens_arr = np.array([state_ens])  # [time, state, ensemble]
 
         terminated = False
         truncated = False
         while not terminated and not truncated:
             # get action from the target actor network
             action = actor.apply(params, state)
-            state, reward, terminated, truncated, info = env.step(action)
+            true_obs, reward, terminated, truncated, info = env.step(action)
             full_state = env.unwrapped.u
-            state_arr = np.vstack((state_arr, state))
+
+            # define observation covariance matrix
+            obs_cov = (
+                np.diag((config.enKF.std_obs * np.ones(len(true_obs))))
+                * np.max(abs(true_obs), axis=0) ** 2
+            )
+
+            # add noise on the observation
+            obs = np.random.multivariate_normal(true_obs, obs_cov)
+
+            # forecast
+            state_ens = forecast(model, state_ens, action)
+
+            # apply enkf
+            state_ens = apply_enKF(model, state_ens, obs, obs_cov, obs_mat)
+            state = ensemble_to_state(state_ens)
+
+            true_obs_arr = np.vstack((true_obs_arr, true_obs))
+            obs_arr = np.vstack((obs_arr, obs))
             full_state_arr = np.vstack((full_state_arr, full_state))
             reward_arr = np.vstack((reward_arr, reward))
+            state_ens_arr = np.concatenate(
+                (state_ens_arr, np.array([state_ens])), axis=0
+            )
 
-        # plot the full state and reward
-        im = axs[i, 0].imshow(
-            full_state_arr.T,
-            extent=[0, len(full_state_arr), x[0], x[-1]],
-            origin="lower",
-            aspect="auto",
+        # get full state from low order model
+        state_ens_arr_ = np.hstack(
+            (state_ens_arr, np.conjugate(np.flip(state_ens_arr[:, 1:-1], axis=1)))
         )
-        axs[i, 0].set_xlabel("t")
-        axs[i, 0].set_ylabel("x")
-        cbar = fig.colorbar(im, ax=[axs[i, 0]], location="left")
-        cbar.ax.set_title("u")
-        axs[i, 0].set_title(
-            f"Return={info['episode']['r'][0]:.2f}, Ave. Reward={info['episode']['r'][0]/info['episode']['l'][0]:.2f}"
+        full_state_ens_arr = np.real(
+            np.einsum("kjm,ij->kim", state_ens_arr_, full_obs_mat)
         )
+        # get the mean
+        full_state_mean_arr = np.mean(full_state_ens_arr, axis=-1)
 
-        axs[i, 1].plot(env.unwrapped.target, x)
-        axs[i, 1].plot(full_state_arr[-1, :], x, "--")
-        axs[i, 1].set_yticks(axs[i, 0].get_yticks())
-        axs[i, 1].set_yticklabels([])
-        axs[i, 1].set_ylim(axs[i, 0].get_ylim())
-        axs[i, 1].set_title(f"Last Reward={reward:.2f}")
-        axs[i, 1].grid()
-        axs[i, 1].set_xlabel("u")
-        axs[i, 1].legend(["Target", "Last"])
+        # get fourier coefficients
+        full_state_arr_f = np.fft.rfft(full_state_arr, axis=1)
+        mag_state_arr = 2 / env.unwrapped.N * np.abs(full_state_arr_f)
+        mag_state_ens_arr = 2 / model.n * np.abs(state_ens_arr)
+        mag_state_mean_arr = np.mean(mag_state_ens_arr, axis=-1)
 
-        err = np.abs(env.unwrapped.target[:, None] - full_state_arr.T)
-        im = axs[i, 2].imshow(
-            err,
-            extent=[0, len(full_state_arr), x[0], x[-1]],
-            origin="lower",
-            aspect="auto",
-            cmap="Reds",
+        # get observations from low order model
+        obs_ens_arr = np.real(np.einsum("kjm,ij->kim", state_ens_arr_, obs_mat))
+        # get the mean
+        obs_mean_arr = np.mean(obs_ens_arr, axis=-1)
+
+        fig = vis.plot_episode(
+            x,
+            x_obs,
+            target,
+            full_state_arr,
+            full_state_ens_arr,
+            full_state_mean_arr,
+            mag_state_arr,
+            mag_state_ens_arr,
+            mag_state_mean_arr,
+            true_obs_arr,
+            obs_arr,
+            obs_ens_arr,
+            obs_mean_arr,
         )
-        axs[i, 2].set_xlabel("t")
-        axs[i, 2].set_yticks(axs[i, 0].get_yticks())
-        axs[i, 2].set_yticklabels([])
-        axs[i, 2].set_ylim(axs[i, 0].get_ylim())
-        cbar = fig.colorbar(im, ax=[axs[i, 2]], location="right")
-        axs[i, 2].set_title("|Target - u|")
+        figs.append(fig)
+    return figs
 
-        # plot the measurements
-        # for j in range(env.unwrapped.num_observations):
-        #     axs2[j, i].plot(full_state_arr[:,env.unwrapped.observation_inds[j]])
-        #     axs2[j, i].plot(state_arr[:,j], 'o--')
-        #     if j < env.unwrapped.num_observations-1:
-        #         axs2[j,i].set_xticklabels([])
-        #     else:
-        #         axs2[j,i].set_xlabel('t')
-        #     if i == 0:
-        #         axs2[j,i].set_ylabel(f'x={x[env.unwrapped.observation_inds[j]]:0.3f}')
-    return fig
+
+def initialize_ensemble(env, model, u0, std_init, m):
+    u0_f = np.fft.rfft(u0, axis=-1)
+    u0_f_low = model.n / env.unwrapped.N * u0_f[: len(model.k)]  # lower order
+    Af_0_real = np.random.multivariate_normal(
+        u0_f_low.real, np.diag((u0_f_low.real * std_init) ** 2), m
+    ).T
+    Af_0_complex = np.random.multivariate_normal(
+        u0_f_low.imag, np.diag((u0_f_low.imag * std_init) ** 2), m
+    ).T
+    Af_0 = Af_0_real + Af_0_complex * 1j
+    return Af_0
+
+
+def get_observation_matrix(model, x):
+    # get the matrix to do inverse fft on observation points
+    k = model.n * np.fft.fftfreq(model.n) * 2 * np.pi / model.L
+    k_x = np.einsum("i,j->ij", x, k) * 1j
+    exp_k_x = np.exp(k_x)
+    M = 1 / model.n * exp_k_x
+    return M
+
+
+def ensemble_to_state(state_ens):
+    state = np.mean(state_ens, axis=-1)
+    # inverse rfft before passing to the neural network
+    state = np.fft.irfft(state)
+    return state
+
+
+def forecast(model, state_ens, action):
+    # advance forecast with low order model
+    for m_idx in range(state_ens.shape[-1]):
+        state_ens[:, m_idx] = model.advance_f(state_ens[:, m_idx], action)
+    return state_ens
+
+
+def EnKF(Af, d, Cdd, M):
+    """Taken from real-time-bias-aware-DA by Novoa.
+    Ensemble Kalman Filter as derived in Evensen (2009) eq. 9.27.
+    Inputs:
+        Af: forecast ensemble at time t
+        d: observation at time t
+        Cdd: observation error covariance matrix
+        M: matrix mapping from state to observation space
+    Returns:
+        Aa: analysis ensemble
+    """
+    m = np.size(Af, 1)
+
+    psi_f_m = np.mean(Af, 1, keepdims=True)
+    Psi_f = Af - psi_f_m
+
+    # Create an ensemble of observations
+    if d.ndim == 2 and d.shape[-1] == m:
+        D = d
+    else:
+        D = np.random.multivariate_normal(d, Cdd, m).transpose()
+    # Mapped forecast matrix M(Af) and mapped deviations M(Af')
+    Y = np.real(np.dot(M, Af))
+    S = np.real(np.dot(M, Psi_f))
+    # because we are multiplying with M first, we get real values
+    # so we never actually compute the covariance of the complex-valued state
+    # if i have to do that, then make sure to do it properly with the complex conjugate!!
+    # Matrix to invert
+    C = (m - 1) * Cdd + np.dot(S, S.T)
+    Cinv = linalg.inv(C)
+
+    X = np.dot(S.T, np.dot(Cinv, (D - Y)))
+
+    Aa = Af + np.dot(Af, X)
+    return Aa
+
+
+def apply_enKF(model, Af, d, Cdd, M):
+    Af_full = np.vstack((Af, np.conjugate(np.flip(Af[1:-1, :], axis=0))))
+    Aa_full = EnKF(Af_full, d, Cdd, M)
+    Aa = Aa_full[: len(model.k), :]
+    return Aa
 
 
 def run_experiment(
-    config, env, eval_env, agent, wandb_run=None, logs=None, checkpoint_dir=None
+    config, env, eval_env, agent, model, wandb_run=None, logs=None, checkpoint_dir=None
 ):
     # random seed for initialization
     key = jax.random.PRNGKey(config.seed)
 
     # initialize networks
     # sample state and action to get the correct shape
-    state_0 = jnp.array([env.observation_space.sample()])
+    state_0 = jnp.array([jnp.zeros(model.n)])
     action_0 = jnp.array([env.action_space.sample()])
     actor_state, critic_state = agent.initial_network_state(key, state_0, action_0)
 
@@ -217,8 +328,20 @@ def run_experiment(
     replay_buffer = ReplayBuffer(config.replay_buffer.capacity)
 
     # initialize environment
-    state, info = env.reset()
+    _, info = env.reset()
+
+    # initialize enKF
+    state_ens = initialize_ensemble(
+        env, model, env.unwrapped.u, config.enKF.std_init, config.enKF.m
+    )
+
+    state = ensemble_to_state(state_ens)
+
+    # need to rewrite the buffer when i want to push all of the ensemble
     replay_buffer.push(state=state, action=None, reward=None, terminated=None)
+
+    # get the observation matrix that maps state to observations
+    obs_mat = get_observation_matrix(model, env.unwrapped.observation_locs)
 
     # standard deviation of the exploration scales with the range of actions in the environment
     exploration_stddev = (
@@ -227,6 +350,7 @@ def run_experiment(
 
     global_step = 0
     n_episode = 0
+
     while global_step < config.total_steps:
         key, _ = jax.random.split(key)
         if global_step < config.learning_starts:
@@ -245,8 +369,26 @@ def run_experiment(
                 action, min=env.action_space.low, max=env.action_space.high
             )
 
-        # get the next state and reward with this action
-        state, reward, terminated, truncated, info = env.step(action)
+        # get the next observation and reward with this action
+        obs, reward, terminated, truncated, info = env.step(action)
+
+        # define observation covariance matrix
+        obs_cov = (
+            np.diag((config.enKF.std_obs * np.ones(len(obs))))
+            * np.max(abs(obs), axis=0) ** 2
+        )
+
+        # add noise on the observation
+        obs = np.random.multivariate_normal(obs, obs_cov)
+
+        # forecast
+        state_ens = forecast(model, state_ens, action)
+
+        # apply enkf
+        state_ens = apply_enKF(model, state_ens, obs, obs_cov, obs_mat)
+
+        state = ensemble_to_state(state_ens)
+
         replay_buffer.push(state, action, reward, terminated)
 
         global_step += 1
@@ -267,7 +409,13 @@ def run_experiment(
 
         if truncated or terminated:
             # reset the environment
-            state, info = env.reset()
+            _, info = env.reset()
+
+            # initialize enKF
+            state_ens = initialize_ensemble(
+                env, model, env.unwrapped.u, config.enKF.std_init, config.enKF.m
+            )
+            state = ensemble_to_state(state_ens)
             replay_buffer.push(state=state, action=None, reward=None, terminated=None)
 
         # if there is enough data in the buffer optimize
@@ -306,7 +454,12 @@ def run_experiment(
             if global_step % config.eval_freq == 0:
                 # evaluate the performance of the target parameters ?
                 eval_ave_return, eval_ave_reward, eval_ave_last_reward = evaluate(
-                    config, eval_env, agent.actor, actor_state.target_params
+                    config,
+                    eval_env,
+                    agent.actor,
+                    actor_state.target_params,
+                    model,
+                    obs_mat,
                 )
                 print(
                     f"\n Evaluation, Step={global_step}/{config.total_steps}, Average Return={eval_ave_return} \n",
@@ -394,8 +547,18 @@ def main(_):
     # create agent and run
     agent = DDPG(config, env)
     print("Starting experiment.", flush=True)
+
+    # create low order model
+    model = KS(
+        nu=config.env.nu,
+        N=config.enKF.low_order_N,
+        dt=env.unwrapped.dt,
+        actuator_locs=config.env.actuator_locs,
+        actuator_scale=config.env.actuator_scale,
+    )
+
     actor_state, critic_state, logs = run_experiment(
-        config, env, eval_env, agent, wandb_run, logs, checkpoint_dir
+        config, env, eval_env, agent, model, wandb_run, logs, checkpoint_dir
     )
 
     # save the final model weights
@@ -416,8 +579,16 @@ def main(_):
 
     # evaluate with the final weights and plot episode
     if config.env_name == "KS":
-        fig = evaluate_KS_for_plotting(eval_env, agent.actor, actor_state.target_params)
-        fig.savefig(FLAGS.experiment_path / "final_evaluation.png")
+        figs = evaluate_KS_for_plotting(
+            eval_env,
+            agent.actor,
+            actor_state.target_params,
+            model,
+            config,
+            eval_episodes=2,
+        )
+        for fig_idx, fig in enumerate(figs):
+            fig.savefig(FLAGS.experiment_path / f"final_evaluation_{fig_idx}.png")
         plt.show()
 
     # close text

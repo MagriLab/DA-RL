@@ -8,9 +8,9 @@ def get_config():
 
     config.seed = 41
 
-    config.total_steps = 100000
+    config.total_steps = 10000
     config.episode_steps = 1000
-    config.learning_starts = 5000
+    config.learning_starts = 1000
     config.eval_freq = 5000
     config.eval_episodes = 5
 
@@ -31,5 +31,11 @@ def get_config():
 
     config.replay_buffer = ml_collections.ConfigDict()
     config.replay_buffer.capacity = 100000
+
+    config.enKF = ml_collections.ConfigDict()
+    config.enKF.std_init = 0.5
+    config.enKF.m = 50
+    config.enKF.std_obs = 0.5
+    config.enKF.low_order_N = 32
 
     return config

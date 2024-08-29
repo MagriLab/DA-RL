@@ -16,8 +16,9 @@ def normal_pdf(x, loc, scale):
 
 
 class KS:
-
-    def __init__(self, actuator_locs, actuator_scale=0.1, nu=1.0, N=256, dt=0.5, device='cpu'):
+    def __init__(
+        self, actuator_locs, actuator_scale=0.1, nu=1.0, N=256, dt=0.5, device="cpu"
+    ):
         """
         :param nu: 'Viscosity' parameter of the KS equation.
         :param N: Number of collocation points
@@ -29,17 +30,21 @@ class KS:
         self.device = device
 
         # Convert the 'viscosity' parameter to a length parameter - this is numerically more stable
-        self.L = (2 * np.pi / np.sqrt(np.array(nu)))
-        self.n = int(N)  # Ensure that N is integer
+        self.L = 2 * np.pi / np.sqrt(np.array(nu))
+        self.n = int(N)  # Ensure that N is integer, N must also be even?
         self.dt = np.array(dt)
         self.x = np.arange(self.n) * self.L / self.n
-        self.k = (self.n * np.fft.fftfreq(self.n)[0:self.n // 2 + 1] * 2 * np.pi / self.L)
+        self.k = (
+            self.n * np.fft.fftfreq(self.n)[0 : self.n // 2 + 1] * 2 * np.pi / self.L
+        )  # goes until -pi
         self.ik = 1j * self.k  # spectral derivative operator
-        self.lin = self.k ** 2 - self.k ** 4  # Fourier multipliers for linear term
+        self.lin = self.k**2 - self.k**4  # Fourier multipliers for linear term
 
         # Actuation set-up
         self.num_actuators = actuator_locs.shape[-1]
-        self.scale = self.L/(2*np.pi) * actuator_scale  # Rescale so that we represent the same actuator shape in [0, 2*pi]
+        self.scale = (
+            self.L / (2 * np.pi) * actuator_scale
+        )  # Rescale so that we represent the same actuator shape in [0, 2*pi]
         # This should really be doable with vmap...
         B_list = []
         for loc in actuator_locs:
@@ -49,8 +54,22 @@ class KS:
 
     def nlterm(self, u, f):
         # compute tendency from nonlinear term. advection + forcing
+        # rfft outputs the positive frequencies n/2+1 if even, (n+1)/2 if odd
         ur = np.fft.irfft(u, axis=-1)
-        return -0.5 * self.ik * np.fft.rfft(ur ** 2, axis=-1) + f
+        return -0.5 * self.ik * np.fft.rfft(ur**2, axis=-1) + f
+
+    def advance_f(self, u, action):
+        # just advances the fourier coefficients
+        f0 = self.B @ action
+        f = np.fft.rfft(f0, axis=-1)
+        u_save = np.copy(u)
+        for n in range(3):
+            dt = self.dt / (3 - n)
+            # explicit RK3 step for nonlinear term
+            u = u_save + dt * self.nlterm(u, f)
+            # implicit trapezoidal adjustment for linear term
+            u = (u + 0.5 * self.lin * dt * u_save) / (1.0 - 0.5 * self.lin * dt)
+        return u
 
     def advance(self, u0, action):
         """
@@ -76,7 +95,7 @@ class KS:
             # explicit RK3 step for nonlinear term
             u = u_save + dt * self.nlterm(u, f)
             # implicit trapezoidal adjustment for linear term
-            u = (u + 0.5 * self.lin * dt * u_save) / (1. - 0.5 * self.lin * dt)
+            u = (u + 0.5 * self.lin * dt * u_save) / (1.0 - 0.5 * self.lin * dt)
         u = np.fft.irfft(u, axis=-1)
         return u
 
@@ -89,13 +108,14 @@ class KS:
         """
         y = np.zeros(self.x.shape)
         for shift in range(-3, 3):
-            y += normal_pdf(self.x + shift*self.L, loc, self.scale)
-        y = y/np.max(y)
+            y += normal_pdf(self.x + shift * self.L, loc, self.scale)
+        y = y / np.max(y)
         return y
 
-if __name__ == '__main__':
-    ks = KS(actuator_locs=np.array([0., np.pi]), device='cuda')
+
+if __name__ == "__main__":
+    ks = KS(actuator_locs=np.array([0.0, np.pi]), device="cuda")
     u = np.zeros(ks.n)
     ks.advance(u, np.zeros(2))
 
-    print('here')
+    print("here")
