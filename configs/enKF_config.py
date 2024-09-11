@@ -8,7 +8,7 @@ def get_config():
 
     config.seed = 41
 
-    config.total_steps = 100000
+    config.total_steps = 50000
     config.episode_steps = 1000
     config.learning_starts = 5000
     config.eval_freq = 5000
@@ -37,6 +37,6 @@ def get_config():
     config.enKF.m = 50
     config.enKF.std_obs = 0.1
     config.enKF.low_order_N = 64
-    config.enKF.observation_starts = 0
+    config.enKF.observation_starts = 100
     config.enKF.wait_steps = 1
     return config

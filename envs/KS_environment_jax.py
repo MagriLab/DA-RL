@@ -118,12 +118,12 @@ class KSenv:
         return result.x
 
     @staticmethod
-    def sample_continuous_space(rng_key, low, high, shape):
+    def sample_continuous_space(key, low, high, shape):
         """
         Sample from a continuous action space defined by low and high bounds.
 
         Args:
-            rng_key: JAX PRNG key.
+            key: JAX PRNG key.
             low: The lower bound of the action space (scalar or array).
             high: The upper bound of the action space (scalar or array).
             shape: The shape of the action space.
@@ -131,11 +131,11 @@ class KSenv:
         Returns:
             Sampled action with the given shape.
         """
-        return jax.random.uniform(rng_key, shape=shape, minval=low, maxval=high)
+        return jax.random.uniform(key, shape=shape, minval=low, maxval=high)
 
     @staticmethod
     def step(
-        u,
+        state,
         action,
         B,
         lin,
@@ -162,24 +162,24 @@ class KSenv:
             truncated: Whether the simulation is truncated.
         """
 
-        def single_step(u, _):
+        def single_step(state, _):
             # Take a step using the KS solver
-            next_u = KS.advance(u, action, B, lin, ik, dt)
+            next_state = KS.advance(state, action, B, lin, ik, dt)
             # Compute reward
             reward = -jnp.linalg.norm(
-                next_u - target
+                next_state - target
             ) - actuator_loss_weight * jnp.linalg.norm(action)
-            return next_u, reward
+            return next_state, reward
 
-        next_u, total_reward = lax.scan(single_step, u, jnp.arange(frame_skip))
+        next_state, total_reward = lax.scan(single_step, state, jnp.arange(frame_skip))
         reward = jnp.mean(total_reward)
 
         # Observe the state at the sensor locations
-        observation = u[observation_inds]
+        observation = next_state[observation_inds]
 
-        terminated = jnp.max(jnp.abs(next_u)) > termination_threshold
+        terminated = jnp.max(jnp.abs(next_state)) > termination_threshold
         truncated = False
-        return next_u, observation, reward, terminated, truncated, {}
+        return next_state, observation, reward, terminated, truncated, {}
 
     @staticmethod
     def reset(
@@ -205,16 +205,16 @@ class KSenv:
             observation: Initial observation.
             info: Additional information.
         """
-        u = initial_amplitude * random.normal(key, (N,))
-        u = u - u.mean()
+        state = initial_amplitude * random.normal(key, (N,))
+        state = state - state.mean()
 
         def burn_in_step(u, _):
             return KS.advance(u, jnp.zeros(action_size), B, lin, ik, dt), None
 
-        u, _ = lax.scan(burn_in_step, u, None, length=burn_in)
+        state, _ = lax.scan(burn_in_step, state, None, length=burn_in)
 
-        observation = u[observation_inds]
-        return u, observation, {}
+        observation = state[observation_inds]
+        return state, observation, {}
 
 
 if __name__ == "__main__":
@@ -225,7 +225,7 @@ if __name__ == "__main__":
         sensor_locs=jnp.array([0.0, 1.0, 2.0]),
         burn_in=0,
     )
-    u, observation, _ = KSenv.reset(
+    state, observation, _ = KSenv.reset(
         env.N,
         env.ks_solver.B,
         env.ks_solver.lin,
@@ -237,8 +237,8 @@ if __name__ == "__main__":
         env.observation_inds,
     )
     action = jnp.zeros(env.ks_solver.B.shape[1])
-    u, reward, terminated, truncated, _ = KSenv.step(
-        u,
+    state, reward, terminated, truncated, _ = KSenv.step(
+        state,
         action,
         env.ks_solver.B,
         env.ks_solver.lin,

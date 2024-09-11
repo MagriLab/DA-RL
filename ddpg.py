@@ -85,9 +85,9 @@ class DDPG:
         # create actor network
         self.actor = Actor(
             config.network.actor_hidden_units,
-            n_action=env.action_space.shape[0],
-            action_min=env.action_space.low,
-            action_max=env.action_space.high,
+            n_action=env.action_size,
+            action_min=env.action_low,
+            action_max=env.action_high,
             activation=getattr(nn, config.network.activation_function),
         )
 
