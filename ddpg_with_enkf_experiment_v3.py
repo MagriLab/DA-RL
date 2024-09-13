@@ -59,7 +59,7 @@ def save_config():
         FLAGS.config.to_yaml(stream=f)
 
 
-def log_metrics_wandb(wandb_run, metrics, step):
+def log_metrics_wandb(wandb_run, metrics, step=None):
     wandb_run.log(data=metrics, step=step)
 
 
@@ -76,68 +76,50 @@ def add_gaussian_noise(key, x, stddev):
     return x + noise
 
 
-# def evaluate_KS_for_plotting(env, actor, params, model, config, eval_episodes=1):
-#     x = env.unwrapped.KS.x
-#     x_obs = env.unwrapped.observation_locs
-#     target = env.unwrapped.target
+def plot_KS_episode(env, model, true_state_arr, true_obs_arr, obs_arr, state_ens_arr):
+    x = env.ks_solver.x
+    x_obs = env.unwrapped.observation_locs
+    target = env.unwrapped.target
 
-#     full_obs_mat = get_observation_matrix(model, x)
-#     obs_mat = get_observation_matrix(model, x_obs)
-#     figs = []
-#     for i in range(eval_episodes):
-#         (
-#             true_obs,
-#             full_state,
-#             state_ens,
-#             true_obs_arr,
-#             obs_arr,
-#             full_state_arr,
-#             state_ens_arr,
-#             _,
-#         ) = evaluate_episode(config, env, actor, params, model, obs_mat)
-#         true_obs_arr = np.vstack((true_obs_arr, true_obs))
-#         obs_arr = np.vstack((obs_arr, true_obs))
-#         full_state_arr = np.vstack((full_state_arr, full_state))
-#         state_ens_arr = np.concatenate((state_ens_arr, np.array([state_ens])), axis=0)
+    full_obs_mat = get_observation_matrix(model.N, model.L, x)
+    obs_mat = get_observation_matrix(model.N, model.L, x)
 
-#         # get full state from low order model
-#         state_ens_arr_ = np.hstack(
-#             (state_ens_arr, np.conjugate(np.flip(state_ens_arr[:, 1:-1], axis=1)))
-#         )
-#         full_state_ens_arr = np.real(
-#             np.einsum("kjm,ij->kim", state_ens_arr_, full_obs_mat)
-#         )
-#         # get the mean
-#         full_state_mean_arr = np.mean(full_state_ens_arr, axis=-1)
+    # get full state from low order model
+    state_ens_arr_ = np.hstack(
+        (state_ens_arr, np.conjugate(np.flip(state_ens_arr[:, 1:-1], axis=1)))
+    )
+    full_state_ens_arr = np.real(np.einsum("kjm,ij->kim", state_ens_arr_, full_obs_mat))
+    # get the mean
+    full_state_mean_arr = np.mean(full_state_ens_arr, axis=-1)
 
-#         # get fourier coefficients
-#         full_state_arr_f = np.fft.rfft(full_state_arr, axis=1)
-#         mag_state_arr = 2 / env.N * np.abs(full_state_arr_f)
-#         mag_state_ens_arr = 2 / model.N * np.abs(state_ens_arr)
-#         mag_state_mean_arr = np.mean(mag_state_ens_arr, axis=-1)
+    # get fourier coefficients
+    true_state_arr_f = np.fft.rfft(true_state_arr, axis=1)
+    mag_state_arr = 2 / env.N * np.abs(true_state_arr_f)
+    mag_state_ens_arr = 2 / model.N * np.abs(state_ens_arr)
+    mag_state_mean_arr = np.mean(mag_state_ens_arr, axis=-1)
 
-#         # get observations from low order model
-#         obs_ens_arr = np.real(np.einsum("kjm,ij->kim", state_ens_arr_, obs_mat))
-#         # get the mean
-#         obs_mean_arr = np.mean(obs_ens_arr, axis=-1)
+    # get observations from low order model
+    obs_ens_arr = np.real(np.einsum("kjm,ij->kim", state_ens_arr_, obs_mat))
+    # get the mean
+    obs_mean_arr = np.mean(obs_ens_arr, axis=-1)
 
-#         fig = vis.plot_episode(
-#             x,
-#             x_obs,
-#             target,
-#             full_state_arr,
-#             full_state_ens_arr,
-#             full_state_mean_arr,
-#             mag_state_arr,
-#             mag_state_ens_arr,
-#             mag_state_mean_arr,
-#             true_obs_arr,
-#             obs_arr,
-#             obs_ens_arr,
-#             obs_mean_arr,
-#         )
-#         figs.append(fig)
-#     return figs
+    # fill the observations
+    fig = vis.plot_episode(
+        x,
+        x_obs,
+        target,
+        true_state_arr,
+        full_state_ens_arr,
+        full_state_mean_arr,
+        mag_state_arr,
+        mag_state_ens_arr,
+        mag_state_mean_arr,
+        true_obs_arr,
+        obs_arr,
+        obs_ens_arr,
+        obs_mean_arr,
+    )
+    return fig
 
 
 def initialize_ensemble(env_N, model_N, model_k, u0, std_init, m, key):
@@ -302,7 +284,7 @@ def run_experiment(
     null_action = jnp.zeros(env.action_size)
 
     # jit the necessary environment functions
-    initialize_ensemble = partial(
+    model_initialize_ensemble = partial(
         initialize_ensemble,
         env_N=env.N,
         model_N=model.N,
@@ -310,7 +292,7 @@ def run_experiment(
         std_init=config.enKF.std_init,
         m=config.enKF.m,
     )
-    initialize_ensemble = jax.jit(initialize_ensemble)
+    model_initialize_ensemble = jax.jit(model_initialize_ensemble)
 
     env_reset = partial(
         KSenv.reset,
@@ -363,11 +345,6 @@ def run_experiment(
         M=obs_mat,
     )
     model_apply_enKF = jax.jit(model_apply_enKF)
-
-    global_step = 0
-    n_episode = 0
-    truncated = False
-    terminated = True
 
     def until_first_observation(true_state, true_obs, state_ens, observation_starts):
         def body_fun(carry, _):
@@ -455,7 +432,7 @@ def run_experiment(
             )
 
         n_loops = episode_steps // wait_steps
-        (true_state, true_obs, state_ens, _), (
+        (true_state, true_obs, state_ens, key_obs), (
             true_state_arr,
             true_obs_arr,
             obs_arr,
@@ -468,6 +445,7 @@ def run_experiment(
             true_state,
             true_obs,
             state_ens,
+            key_obs,
             true_state_arr,
             true_obs_arr,
             obs_arr,
@@ -486,7 +464,8 @@ def run_experiment(
         replay_buffer,
     ):
         def forecast_fun(carry, _):
-            true_state, true_obs, state_ens, state, key_action, replay_buffer = carry
+            true_state, true_obs, state_ens, key_action, replay_buffer = carry
+            state = ensemble_to_state(state_ens)
 
             # get action
             key_action, _ = jax.random.split(key_action)
@@ -508,7 +487,6 @@ def run_experiment(
                 next_true_state,
                 next_true_obs,
                 next_state_ens,
-                next_state,
                 key_action,
                 replay_buffer,
             ), (true_state, true_obs, state_ens, reward)
@@ -531,26 +509,27 @@ def run_experiment(
 
             # apply enkf to correct the state estimation
             state_ens = model_apply_enKF(Af=state_ens, d=obs, Cdd=obs_cov, key=key_enKF)
-            (true_state, true_obs, state_ens, state, key_action, replay_buffer), (
+            (true_state, true_obs, state_ens, key_action, replay_buffer), (
                 true_state_arr,
                 true_obs_arr,
                 state_ens_arr,
                 reward_arr,
             ) = jax.lax.scan(
                 forecast_fun,
-                (true_state, true_obs, state, state_ens, key_action, replay_buffer),
+                (true_state, true_obs, state_ens, key_action, replay_buffer),
                 jnp.arange(wait_steps),
             )
-            return (true_state, true_obs, state_ens, key_obs, key_action), (
-                true_state_arr,
-                true_obs_arr,
-                obs,
-                state_ens_arr,
-                reward_arr,
-            )
+            return (
+                true_state,
+                true_obs,
+                state_ens,
+                key_obs,
+                key_action,
+                replay_buffer,
+            ), (true_state_arr, true_obs_arr, obs, state_ens_arr, reward_arr)
 
         n_loops = episode_steps // wait_steps
-        (true_state, true_obs, state_ens, _), (
+        (true_state, true_obs, state_ens, _, _, replay_buffer), (
             true_state_arr,
             true_obs_arr,
             obs_arr,
@@ -558,33 +537,27 @@ def run_experiment(
             reward_arr,
         ) = jax.lax.scan(
             body_fun,
-            (
-                true_state,
-                true_obs,
-                state_ens,
-                state,
-                key_obs,
-                key_action,
-                replay_buffer,
-            ),
+            (true_state, true_obs, state_ens, key_obs, key_action, replay_buffer),
             jnp.arange(n_loops),
         )
         return (
             true_state,
             true_obs,
             state_ens,
+            key_obs,
+            key_action,
             true_state_arr,
             true_obs_arr,
             obs_arr,
             state_ens_arr,
             reward_arr,
+            replay_buffer,
         )
 
     def learn_observe_and_forecast(
         true_state,
         true_obs,
         state_ens,
-        params,
         wait_steps,
         episode_steps,
         key_obs,
@@ -598,15 +571,16 @@ def run_experiment(
                 true_state,
                 true_obs,
                 state_ens,
-                state,
                 key_action,
                 replay_buffer,
                 actor_state,
                 critic_state,
             ) = carry
 
+            state = ensemble_to_state(state_ens)
+
             # get action from the learning actor network
-            action = agent.actor.apply(params, state)
+            action = agent.actor.apply(actor_state.params, state)
 
             # add exploration noise on the action
             # original paper adds Ornstein-Uhlenbeck process noise
@@ -648,7 +622,6 @@ def run_experiment(
                 sampled_reward,
                 sampled_terminated,
             )
-
             actor_state, policy_loss = agent.update_actor(
                 actor_state, critic_state, sampled_state
             )
@@ -660,7 +633,6 @@ def run_experiment(
                 next_true_state,
                 next_true_obs,
                 next_state_ens,
-                next_state,
                 key_action,
                 replay_buffer,
                 actor_state,
@@ -698,7 +670,6 @@ def run_experiment(
                 true_state,
                 true_obs,
                 state_ens,
-                state,
                 key_action,
                 replay_buffer,
                 actor_state,
@@ -716,7 +687,6 @@ def run_experiment(
                     true_state,
                     true_obs,
                     state_ens,
-                    state,
                     key_action,
                     replay_buffer,
                     actor_state,
@@ -728,16 +698,32 @@ def run_experiment(
                 true_state,
                 true_obs,
                 state_ens,
-                state,
                 key_obs,
                 key_action,
                 replay_buffer,
                 actor_state,
                 critic_state,
-            ), (true_state_arr, true_obs_arr, obs, state_ens_arr, reward_arr)
+            ), (
+                true_state_arr,
+                true_obs_arr,
+                obs,
+                state_ens_arr,
+                reward_arr,
+                q_loss_arr,
+                policy_loss_arr,
+            )
 
         n_loops = episode_steps // wait_steps
-        (true_state, true_obs, state_ens, _), (
+        (
+            true_state,
+            true_obs,
+            state_ens,
+            key_obs,
+            key_action,
+            replay_buffer,
+            actor_state,
+            critic_state,
+        ), (
             true_state_arr,
             true_obs_arr,
             obs_arr,
@@ -763,6 +749,8 @@ def run_experiment(
             true_state,
             true_obs,
             state_ens,
+            key_obs,
+            key_action,
             true_state_arr,
             true_obs_arr,
             obs_arr,
@@ -770,6 +758,9 @@ def run_experiment(
             reward_arr,
             q_loss_arr,
             policy_loss_arr,
+            replay_buffer,
+            actor_state,
+            critic_state,
         )
 
     until_first_observation = partial(
@@ -798,13 +789,13 @@ def run_experiment(
     )
     learn_observe_and_forecast = jax.jit(learn_observe_and_forecast)
 
-    def act_evaluate_episode(key_env, key_obs, params):
+    def act_episode(key_env, key_obs, params):
         # reset the environment
         key_env, key_ens = jax.random.split(key_env)
         init_true_state, init_true_obs, _ = env_reset(key=key_env)
 
         # initialize enKF
-        init_state_ens = initialize_ensemble(u0=init_true_state, key=key_ens)
+        init_state_ens = model_initialize_ensemble(u0=init_true_state, key=key_ens)
 
         # forecast until first observation
         (
@@ -821,6 +812,7 @@ def run_experiment(
             true_state,
             true_obs,
             state_ens,
+            key_obs,
             true_state_arr,
             true_obs_arr,
             obs_arr,
@@ -841,6 +833,10 @@ def run_experiment(
                 true_state_arr.shape[2],
             ),
         )
+        true_obs_arr = jnp.reshape(
+            true_obs_arr,
+            (true_obs_arr.shape[0] * true_obs_arr.shape[1], true_obs_arr.shape[2]),
+        )
         state_ens_arr = jnp.reshape(
             state_ens_arr,
             (
@@ -849,11 +845,10 @@ def run_experiment(
                 state_ens_arr.shape[3],
             ),
         )
-        true_obs_arr = jnp.reshape(
-            true_obs_arr,
-            (true_obs_arr.shape[0] * true_obs_arr.shape[1], true_obs_arr.shape[2]),
+        reward_arr = jnp.reshape(
+            reward_arr,
+            (reward_arr.shape[0] * reward_arr.shape[1],),
         )
-
         stack = lambda a, b, c: jnp.vstack((jnp.expand_dims(a, axis=0), b, c))
 
         return (
@@ -862,16 +857,18 @@ def run_experiment(
             obs_arr,
             stack(init_state_ens, state_ens_arr0, state_ens_arr),
             reward_arr,
+            key_env,
+            key_obs,
         )
 
-    def random_evaluate_episode(key_env, key_obs, key_action, replay_buffer):
+    def random_episode(key_env, key_obs, key_action, replay_buffer):
         # do i need to pass actor state?
         # reset the environment
         key_env, key_ens = jax.random.split(key_env)
         init_true_state, init_true_obs, _ = env_reset(key=key_env)
 
         # initialize enKF
-        init_state_ens = initialize_ensemble(u0=init_true_state, key=key_ens)
+        init_state_ens = model_initialize_ensemble(u0=init_true_state, key=key_ens)
 
         # forecast until first observation
         (
@@ -888,11 +885,14 @@ def run_experiment(
             true_state,
             true_obs,
             state_ens,
+            key_obs,
+            key_action,
             true_state_arr,
             true_obs_arr,
             obs_arr,
             state_ens_arr,
             reward_arr,
+            replay_buffer,
         ) = random_observe_and_forecast(
             true_state=true_state,
             true_obs=true_obs,
@@ -909,6 +909,10 @@ def run_experiment(
                 true_state_arr.shape[2],
             ),
         )
+        true_obs_arr = jnp.reshape(
+            true_obs_arr,
+            (true_obs_arr.shape[0] * true_obs_arr.shape[1], true_obs_arr.shape[2]),
+        )
         state_ens_arr = jnp.reshape(
             state_ens_arr,
             (
@@ -917,9 +921,9 @@ def run_experiment(
                 state_ens_arr.shape[3],
             ),
         )
-        true_obs_arr = jnp.reshape(
-            true_obs_arr,
-            (true_obs_arr.shape[0] * true_obs_arr.shape[1], true_obs_arr.shape[2]),
+        reward_arr = jnp.reshape(
+            reward_arr,
+            (reward_arr.shape[0] * reward_arr.shape[1],),
         )
 
         stack = lambda a, b, c: jnp.vstack((jnp.expand_dims(a, axis=0), b, c))
@@ -930,18 +934,21 @@ def run_experiment(
             obs_arr,
             stack(init_state_ens, state_ens_arr0, state_ens_arr),
             reward_arr,
+            replay_buffer,
+            key_env,
+            key_obs,
+            key_action,
         )
 
-    def learn_evaluate_episode(
+    def learn_episode(
         key_env, key_obs, key_action, replay_buffer, actor_state, critic_state
     ):
-        # do i need to pass actor state?
         # reset the environment
         key_env, key_ens = jax.random.split(key_env)
         init_true_state, init_true_obs, _ = env_reset(key=key_env)
 
         # initialize enKF
-        init_state_ens = initialize_ensemble(u0=init_true_state, key=key_ens)
+        init_state_ens = model_initialize_ensemble(u0=init_true_state, key=key_ens)
 
         # forecast until first observation
         (
@@ -958,11 +965,18 @@ def run_experiment(
             true_state,
             true_obs,
             state_ens,
+            key_obs,
+            key_action,
             true_state_arr,
             true_obs_arr,
             obs_arr,
             state_ens_arr,
             reward_arr,
+            q_loss_arr,
+            policy_loss_arr,
+            replay_buffer,
+            actor_state,
+            critic_state,
         ) = learn_observe_and_forecast(
             true_state=true_state,
             true_obs=true_obs,
@@ -981,6 +995,12 @@ def run_experiment(
                 true_state_arr.shape[2],
             ),
         )
+
+        true_obs_arr = jnp.reshape(
+            true_obs_arr,
+            (true_obs_arr.shape[0] * true_obs_arr.shape[1], true_obs_arr.shape[2]),
+        )
+
         state_ens_arr = jnp.reshape(
             state_ens_arr,
             (
@@ -989,9 +1009,20 @@ def run_experiment(
                 state_ens_arr.shape[3],
             ),
         )
-        true_obs_arr = jnp.reshape(
-            true_obs_arr,
-            (true_obs_arr.shape[0] * true_obs_arr.shape[1], true_obs_arr.shape[2]),
+
+        reward_arr = jnp.reshape(
+            reward_arr,
+            (reward_arr.shape[0] * reward_arr.shape[1],),
+        )
+
+        q_loss_arr = jnp.reshape(
+            q_loss_arr,
+            (q_loss_arr.shape[0] * q_loss_arr.shape[1],),
+        )
+
+        policy_loss_arr = jnp.reshape(
+            policy_loss_arr,
+            (policy_loss_arr.shape[0] * policy_loss_arr.shape[1],),
         )
 
         stack = lambda a, b, c: jnp.vstack((jnp.expand_dims(a, axis=0), b, c))
@@ -1002,183 +1033,294 @@ def run_experiment(
             obs_arr,
             stack(init_state_ens, state_ens_arr0, state_ens_arr),
             reward_arr,
+            q_loss_arr,
+            policy_loss_arr,
+            replay_buffer,
+            actor_state,
+            critic_state,
+            key_env,
+            key_obs,
+            key_action,
         )
 
-    while global_step < config.total_steps:
-        # initialize episode
-        if truncated or terminated:
-            # reset the environment
-            key_env, key_ens = jax.random.split(key_env)
-            true_state, true_obs, info = env_reset(key=key_env)
-
-            # initialize enKF
-            state_ens = initialize_ensemble(
-                env.N,
-                model.N,
-                model.k,
-                true_state,
-                config.enKF.std_init,
-                config.enKF.m,
-                key_ens,
-            )
-
-            # forecast until first observation
-            (
-                next_true_state,
-                next_true_obs,
-                next_state_ens,
-                _,
-                _,
-                _,
-            ) = until_first_observation(
-                true_state=true_state, true_obs=true_obs, state_ens=state_ens
-            )
-            next_state = ensemble_to_state(next_state_ens)
-
-            # reset
-            episode_step = 0
-            episode_return = 0
-            global_step = global_step + config.enKF.observation_starts
-
-        true_state = next_true_state
-        true_obs = next_true_obs
-        state_ens = next_state_ens
-        state = next_state
-
-        if episode_step % config.enKF.wait_steps == 0:
-            # we got an observation
-            # define observation covariance matrix
-            obs_cov = (
-                jnp.diag((config.enKF.std_obs * jnp.ones(len(true_obs))))
-                * jnp.max(abs(true_obs), axis=0) ** 2
-            )
-
-            # add noise on the observation
-            key_obs, key_enKF = jax.random.split(key_obs)
-            obs = jax.random.multivariate_normal(
-                key_obs, true_obs, obs_cov, method="svd"
-            )
-
-            # apply enkf to correct the state estimation
-            state_ens = model_apply_enKF(Af=state_ens, d=obs, Cdd=obs_cov, key=key_enKF)
-            state = ensemble_to_state(state_ens)
-
-        if global_step < config.learning_starts:
-            # collect samples before starting to train
-            key_action, _ = jax.random.split(key_action)
-            action = env_sample_action(key=key_action)
-        else:
-            # get action from the learning actor network
-            action = agent.actor.apply(actor_state.params, state)
-
-            # add exploration noise on the action
-            # original paper adds Ornstein-Uhlenbeck process noise
-            # but in other papers this is deemed unnecessary
-            key_action, _ = jax.random.split(key_action)
-            action = add_gaussian_noise(key_action, action, stddev=exploration_stddev)
-            # clip the action so that it obeys the limits set by the environment
-            action = jnp.clip(action, min=env.action_low, max=env.action_high)
-
-        # get the next observation and reward with this action
-        next_true_state, next_true_obs, reward, terminated, truncated, info = env_step(
-            state=true_state, action=action
+    # fill replay buffer with episodes with random inputs
+    random_episodes = config.learning_starts // config.episode_steps
+    for i in range(random_episodes):
+        (
+            _,
+            _,
+            _,
+            _,
+            reward_arr,
+            replay_buffer,
+            key_env,
+            key_obs,
+            key_action,
+        ) = random_episode(key_env, key_obs, key_action, replay_buffer)
+        random_return = jnp.sum(reward_arr)
+        random_ave_reward = jnp.mean(reward_arr)
+        random_last_reward = reward_arr[-1]
+        print(
+            f"Random input, Episode={i+1}/{random_episodes}, Return={random_return},  Average Reward={random_ave_reward}, Last Reward ={random_last_reward}",
+            flush=True,
         )
-
-        # forecast
-        next_state_ens = model_forecast(state_ens=state_ens, action=action)
-        next_state = ensemble_to_state(next_state_ens)
-
-        replay_buffer = add_experience(
-            replay_buffer, state, action, reward, next_state, terminated
+    print("\n")
+    # learn and evaluate
+    learn_episodes = (
+        config.total_steps - config.learning_starts
+    ) // config.episode_steps
+    n_eval = config.eval_freq // config.episode_steps
+    learn_steps = config.episode_steps - config.enKF.observation_starts
+    metrics = {"train": {}, "eval": {}}
+    for i in range(learn_episodes):
+        (
+            _,
+            _,
+            _,
+            _,
+            reward_arr,
+            q_loss_arr,
+            policy_loss_arr,
+            replay_buffer,
+            actor_state,
+            critic_state,
+            key_env,
+            key_obs,
+            key_action,
+        ) = learn_episode(
+            key_env, key_obs, key_action, replay_buffer, actor_state, critic_state
         )
-        episode_step += 1
-        global_step += 1
-        episode_return += reward
-        metrics = {"train": {}, "eval": {}}
+        train_return = jnp.sum(reward_arr)
+        train_ave_reward = jnp.mean(reward_arr)
+        train_last_reward = reward_arr[-1]
+        print(
+            f"Training, Episode={i+1}/{learn_episodes}, Return={train_return},  Average Reward={train_ave_reward}, Last Reward ={train_last_reward}",
+            flush=True,
+        )
+        for j, (q_loss, policy_loss) in enumerate(zip(q_loss_arr, policy_loss_arr)):
+            metrics["q_loss"] = q_loss
+            metrics["policy_loss"] = policy_loss
+            if wandb_run is not None:
+                log_metrics_wandb(
+                    wandb_run,
+                    metrics={"q_loss": q_loss, "policy_loss": policy_loss},
+                    step=i * learn_steps + j,
+                )
 
-        if (
-            episode_step + config.enKF.observation_starts
-        ) == config.episode_steps or terminated:
-            truncated = True
-            n_episode += 1
+        metrics["train"]["episode_return"] = train_return
+        metrics["train"]["episode_average_reward"] = train_ave_reward
+        metrics["train"]["episode_last_reward"] = train_last_reward
+        if (i + 1) % n_eval == 0:
+            eval_ave_return = 0
+            eval_ave_reward = 0
+            eval_ave_last_reward = 0
+            for _ in range(config.eval_episodes):
+                _, _, _, _, reward_arr, key_env, key_obs = act_episode(
+                    key_env, key_obs, actor_state.params
+                )
+                eval_ave_return += jnp.sum(reward_arr)
+                eval_ave_reward += jnp.mean(reward_arr)
+                eval_ave_last_reward += reward_arr[-1]
+            eval_ave_return = eval_ave_return / config.eval_episodes
+            eval_ave_reward = eval_ave_reward / config.eval_episodes
+            eval_ave_last_reward = eval_ave_last_reward / config.eval_episodes
             print(
-                f"Episode {n_episode}, Step={global_step}/{config.total_steps}, Return={episode_return}",
+                f"\n Evaluation, Episode={i+1}/{learn_episodes}, Average Return={eval_ave_return}, Average Reward={eval_ave_reward}, Average Last Reward ={eval_ave_last_reward} \n ",
                 flush=True,
             )
-            # episode statistics to log
-            metrics["train"]["episode_return"] = episode_return
-            metrics["train"]["episode_length"] = episode_step
-            metrics["train"]["episode_average_reward"] = episode_return / episode_step
-            metrics["train"]["episode_last_reward"] = reward
-
-        # if there is enough data in the buffer optimize
-        if (
-            global_step >= config.learning_starts
-            and replay_buffer["size"] >= config.train.batch_size
-        ):
-            sampled, replay_buffer = sample_experiences(
-                replay_buffer, config.train.batch_size
-            )
-            (
-                sampled_state,
-                sampled_action,
-                sampled_next_state,
-                sampled_reward,
-                sampled_terminated,
-            ) = sampled
-            critic_state, q_loss = agent.update_critic(
-                actor_state,
-                critic_state,
-                sampled_state,
-                sampled_action,
-                sampled_next_state,
-                sampled_reward,
-                sampled_terminated,
-            )
-
-            actor_state, policy_loss = agent.update_actor(
-                actor_state, critic_state, sampled_state
-            )
-
-            actor_state, critic_state = agent.update_target_networks(
-                actor_state, critic_state
-            )
-
-            # losses to log
-            metrics["train"]["q_loss"] = q_loss
-            metrics["train"]["policy_loss"] = policy_loss
-
-            if global_step % config.eval_freq == 0:
-                # evaluate the performance of the target parameters ?
-                (_, _, _, _, reward_arr) = act_evaluate_episode(
-                    key_env=key_env, key_obs=key_obs, params=actor_state.target_params
-                )
-                eval_ave_return = jnp.sum(reward_arr)
-                eval_ave_reward = jnp.mean(reward_arr)
-                eval_ave_last_reward = reward_arr[-1]
-                print(
-                    f"\n Evaluation, Step={global_step}/{config.total_steps}, Average Return={eval_ave_return} \n",
-                    flush=True,
-                )
-                metrics["eval"]["average_return"] = eval_ave_return
-                metrics["eval"]["average_reward"] = eval_ave_reward
-                metrics["eval"]["average_last_reward"] = eval_ave_last_reward
+            metrics["eval"]["average_return"] = eval_ave_return
+            metrics["eval"]["average_reward"] = eval_ave_reward
+            metrics["eval"]["average_last_reward"] = eval_ave_last_reward
 
         if wandb_run is not None:
-            log_metrics_wandb(wandb_run, metrics, step=global_step)
-
-        if logs is not None:
-            log_metrics_offline(logs, metrics)
-
+            log_metrics_wandb(wandb_run, metrics, step=(i + 1) * learn_steps - 1)
         # checkpoint the model
         if checkpoint_dir is not None:
             checkpoint = {"actor": actor_state, "critic": critic_state}
             save_args = orbax_utils.save_args_from_target(checkpoint)
             checkpoint_manager.save(
-                global_step, checkpoint, save_kwargs={"save_args": save_args}
+                (i + 1) * learn_steps, checkpoint, save_kwargs={"save_args": save_args}
             )
+    return (
+        actor_state,
+        critic_state,
+    )
 
-    return actor_state, critic_state, logs
+    # while global_step < config.total_steps:
+    #     # initialize episode
+    #     if truncated or terminated:
+    #         # reset the environment
+    #         key_env, key_ens = jax.random.split(key_env)
+    #         true_state, true_obs, info = env_reset(key=key_env)
+
+    #         # initialize enKF
+    #         state_ens = initialize_ensemble(
+    #             env.N,
+    #             model.N,
+    #             model.k,
+    #             true_state,
+    #             config.enKF.std_init,
+    #             config.enKF.m,
+    #             key_ens,
+    #         )
+
+    #         # forecast until first observation
+    #         (
+    #             next_true_state,
+    #             next_true_obs,
+    #             next_state_ens,
+    #             _,
+    #             _,
+    #             _,
+    #         ) = until_first_observation(
+    #             true_state=true_state, true_obs=true_obs, state_ens=state_ens
+    #         )
+    #         next_state = ensemble_to_state(next_state_ens)
+
+    #         # reset
+    #         episode_step = 0
+    #         episode_return = 0
+    #         global_step = global_step + config.enKF.observation_starts
+
+    #     true_state = next_true_state
+    #     true_obs = next_true_obs
+    #     state_ens = next_state_ens
+    #     state = next_state
+
+    #     if episode_step % config.enKF.wait_steps == 0:
+    #         # we got an observation
+    #         # define observation covariance matrix
+    #         obs_cov = (
+    #             jnp.diag((config.enKF.std_obs * jnp.ones(len(true_obs))))
+    #             * jnp.max(abs(true_obs), axis=0) ** 2
+    #         )
+
+    #         # add noise on the observation
+    #         key_obs, key_enKF = jax.random.split(key_obs)
+    #         obs = jax.random.multivariate_normal(
+    #             key_obs, true_obs, obs_cov, method="svd"
+    #         )
+
+    #         # apply enkf to correct the state estimation
+    #         state_ens = model_apply_enKF(Af=state_ens, d=obs, Cdd=obs_cov, key=key_enKF)
+    #         state = ensemble_to_state(state_ens)
+
+    #     if global_step < config.learning_starts:
+    #         # collect samples before starting to train
+    #         key_action, _ = jax.random.split(key_action)
+    #         action = env_sample_action(key=key_action)
+    #     else:
+    #         # get action from the learning actor network
+    #         action = agent.actor.apply(actor_state.params, state)
+
+    #         # add exploration noise on the action
+    #         # original paper adds Ornstein-Uhlenbeck process noise
+    #         # but in other papers this is deemed unnecessary
+    #         key_action, _ = jax.random.split(key_action)
+    #         action = add_gaussian_noise(key_action, action, stddev=exploration_stddev)
+    #         # clip the action so that it obeys the limits set by the environment
+    #         action = jnp.clip(action, min=env.action_low, max=env.action_high)
+
+    #     # get the next observation and reward with this action
+    #     next_true_state, next_true_obs, reward, terminated, truncated, info = env_step(
+    #         state=true_state, action=action
+    #     )
+
+    #     # forecast
+    #     next_state_ens = model_forecast(state_ens=state_ens, action=action)
+    #     next_state = ensemble_to_state(next_state_ens)
+
+    #     replay_buffer = add_experience(
+    #         replay_buffer, state, action, reward, next_state, terminated
+    #     )
+    #     episode_step += 1
+    #     global_step += 1
+    #     episode_return += reward
+    #     metrics = {"train": {}, "eval": {}}
+
+    #     if (
+    #         episode_step + config.enKF.observation_starts
+    #     ) == config.episode_steps or terminated:
+    #         truncated = True
+    #         n_episode += 1
+    #         print(
+    #             f"Episode {n_episode}, Step={global_step}/{config.total_steps}, Return={episode_return}",
+    #             flush=True,
+    #         )
+    #         # episode statistics to log
+    #         metrics["train"]["episode_return"] = episode_return
+    #         metrics["train"]["episode_length"] = episode_step
+    #         metrics["train"]["episode_average_reward"] = episode_return / episode_step
+    #         metrics["train"]["episode_last_reward"] = reward
+
+    #     # if there is enough data in the buffer optimize
+    #     if (
+    #         global_step >= config.learning_starts
+    #         and replay_buffer["size"] >= config.train.batch_size
+    #     ):
+    #         sampled, replay_buffer = sample_experiences(
+    #             replay_buffer, config.train.batch_size
+    #         )
+    #         (
+    #             sampled_state,
+    #             sampled_action,
+    #             sampled_next_state,
+    #             sampled_reward,
+    #             sampled_terminated,
+    #         ) = sampled
+    #         critic_state, q_loss = agent.update_critic(
+    #             actor_state,
+    #             critic_state,
+    #             sampled_state,
+    #             sampled_action,
+    #             sampled_next_state,
+    #             sampled_reward,
+    #             sampled_terminated,
+    #         )
+
+    #         actor_state, policy_loss = agent.update_actor(
+    #             actor_state, critic_state, sampled_state
+    #         )
+
+    #         actor_state, critic_state = agent.update_target_networks(
+    #             actor_state, critic_state
+    #         )
+
+    #         # losses to log
+    #         metrics["train"]["q_loss"] = q_loss
+    #         metrics["train"]["policy_loss"] = policy_loss
+
+    #         if global_step % config.eval_freq == 0:
+    #             # evaluate the performance of the target parameters ?
+    #             (_, _, _, _, reward_arr) = act_evaluate_episode(
+    #                 key_env=key_env, key_obs=key_obs, params=actor_state.target_params
+    #             )
+    #             eval_ave_return = jnp.sum(reward_arr)
+    #             eval_ave_reward = jnp.mean(reward_arr)
+    #             eval_ave_last_reward = reward_arr[-1]
+    #             print(
+    #                 f"\n Evaluation, Step={global_step}/{config.total_steps}, Average Return={eval_ave_return} \n",
+    #                 flush=True,
+    #             )
+    #             metrics["eval"]["average_return"] = eval_ave_return
+    #             metrics["eval"]["average_reward"] = eval_ave_reward
+    #             metrics["eval"]["average_last_reward"] = eval_ave_last_reward
+
+    #     if wandb_run is not None:
+    #         log_metrics_wandb(wandb_run, metrics, step=global_step)
+
+    #     if logs is not None:
+    #         log_metrics_offline(logs, metrics)
+
+    #     # checkpoint the model
+    #     if checkpoint_dir is not None:
+    #         checkpoint = {"actor": actor_state, "critic": critic_state}
+    #         save_args = orbax_utils.save_args_from_target(checkpoint)
+    #         checkpoint_manager.save(
+    #             global_step, checkpoint, save_kwargs={"save_args": save_args}
+    #         )
+
+    # return actor_state, critic_state, logs
 
 
 def main(_):
@@ -1226,7 +1368,6 @@ def main(_):
     # create environment
     if config.env_name == "KS":
         env = KSenv(**config.env)
-        eval_env = KSenv(**config.env)
 
     # create agent and run
     agent = DDPG(config, env)
@@ -1241,7 +1382,7 @@ def main(_):
         actuator_scale=config.env.actuator_scale,
     )
 
-    actor_state, critic_state, logs = run_experiment(
+    actor_state, critic_state = run_experiment(
         config, env, agent, model, wandb_run, logs, checkpoint_dir
     )
 

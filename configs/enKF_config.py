@@ -38,5 +38,5 @@ def get_config():
     config.enKF.std_obs = 0.1
     config.enKF.low_order_N = 64
     config.enKF.observation_starts = 100
-    config.enKF.wait_steps = 1
+    config.enKF.wait_steps = 10
     return config
