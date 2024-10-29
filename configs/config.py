@@ -8,7 +8,7 @@ def get_config():
 
     config.seed = 41
 
-    config.total_steps = 100000
+    config.total_steps = 50000
     config.episode_steps = 1000
     config.learning_starts = 5000
     config.eval_freq = 5000

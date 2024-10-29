@@ -88,7 +88,13 @@ class KS:
         # Calculate the forcing term in real space
         f0 = B @ action
         # Transform the forcing term to Fourier space
-        f = jnp.fft.rfft(f0, axis=-1)
+        f_fine = jnp.fft.rfft(
+            f0, axis=-1
+        )  # we do this to eliminate aliasing from the excitation
+        N = 2 * (u.shape[0] - 1)  # because u in fourier
+        N_fine = B.shape[0]
+        f = N / N_fine * f_fine[: ik.shape[0]]
+
         # Save the current Fourier coefficients
         u_save = jnp.copy(u)
 
@@ -121,8 +127,14 @@ class KS:
         # Calculate the forcing term in real space
         f0 = B @ action
         # Transform the solution and forcing term to Fourier space
+        f_fine = jnp.fft.rfft(
+            f0, axis=-1
+        )  # we do this to eliminate aliasing from the excitation
+        N = u0.shape[0]  # because u in velocity
+        N_fine = B.shape[0]
+        f = N / N_fine * f_fine[: ik.shape[0]]
+
         u = jnp.fft.rfft(u0, axis=-1)
-        f = jnp.fft.rfft(f0, axis=-1)
         # Save the current Fourier coefficients
         u_save = jnp.copy(u)
 
@@ -151,17 +163,29 @@ class KS:
         Returns:
             Periodic normal distribution values over the grid `self.x`.
         """
+        self.N_fine = max(64, self.N)
+        x_fine = jnp.arange(self.N_fine) * self.L / self.N_fine
         shifts = jnp.arange(
             -3, 3
         )  # Consider periodic copies within the range [-3L, 3L]
         # Sum the contributions from all periodic copies of the normal distribution
         y = jnp.sum(
-            vmap(lambda shift: normal_pdf(self.x + shift * self.L, loc, self.scale))(
+            vmap(lambda shift: normal_pdf(x_fine + shift * self.L, loc, self.scale))(
                 shifts
             ),
             axis=0,
         )
-        y = y / jnp.max(y)  # Normalize the distribution
+        # compute y_max by looking at the peak
+        # this is to ensure that the max is the same even when the grid points
+        # don't align with the actuator locations
+        y_max = jnp.sum(
+            vmap(lambda shift: normal_pdf(loc + shift * self.L, loc, self.scale))(
+                shifts
+            ),
+            axis=0,
+        )
+        y = y / y_max  # Normalize the distribution
+        # can also check this against the max you get from the fine grid
         return y
 
 

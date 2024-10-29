@@ -22,7 +22,6 @@ import utils.flags as myflags
 import wandb
 from ddpg import DDPG
 from envs.KS_environment_jax import KSenv
-from envs.KS_solver_jax import KS
 from replay_buffer_jax import add_experience, init_replay_buffer, sample_experiences
 from utils import visualizations as vis
 from utils import covariance_matrix as cov
@@ -76,11 +75,9 @@ def add_gaussian_noise(key, x, stddev):
 
 def plot_KS_episode(
     env,
-    model,
     true_state_arr,
     true_obs_arr,
     unfilled_obs_arr,
-    state_ens_arr,
     action_arr,
     reward_arr,
     wait_steps,
@@ -91,8 +88,6 @@ def plot_KS_episode(
     x_act = env.actuator_locs * (env.ks_solver.L / (2 * jnp.pi))
     target = env.target
 
-    full_obs_mat = get_observation_matrix(model.N, model.L, x)
-    obs_mat = get_observation_matrix(model.N, model.L, x_obs)
     # fill the observations
     obs_arr = jnp.nan * jnp.ones_like(true_obs_arr)
     for i in range(len(obs_arr)):
@@ -100,75 +95,26 @@ def plot_KS_episode(
             unfilled_obs_arr[i]
         )
 
-    # get full state from low order model
-    state_ens_arr_ = jnp.hstack(
-        (state_ens_arr, jnp.conjugate(jnp.flip(state_ens_arr[:, 1:-1], axis=1)))
-    )
-    full_state_ens_arr = jnp.real(
-        jnp.einsum("kjm,ij->kim", state_ens_arr_, full_obs_mat)
-    )
-    # get the mean
-    full_state_mean_arr = jnp.mean(full_state_ens_arr, axis=-1)
-
     # get fourier coefficients
     true_state_arr_f = jnp.fft.rfft(true_state_arr, axis=1)
     mag_state_arr = 2 / env.N * jnp.abs(true_state_arr_f)
-    mag_state_ens_arr = 2 / model.N * jnp.abs(state_ens_arr)
-    mag_state_mean_arr = jnp.mean(mag_state_ens_arr, axis=-1)
-
-    # get observations from low order model
-    obs_ens_arr = jnp.real(jnp.einsum("kjm,ij->kim", state_ens_arr_, obs_mat))
-    # get the mean
-    obs_mean_arr = jnp.mean(obs_ens_arr, axis=-1)
 
     # fill the observations
-    fig = vis.plot_episode(
+    fig = vis.plot_episode_wo_KF(
         x,
         x_obs,
         x_act,
         target,
         true_state_arr,
-        full_state_ens_arr,
-        full_state_mean_arr,
         mag_state_arr,
-        mag_state_ens_arr,
-        mag_state_mean_arr,
         true_obs_arr,
         obs_arr,
-        obs_ens_arr,
-        obs_mean_arr,
         action_arr,
         reward_arr,
+        observation_starts,
+        wait_steps,
     )
     return fig
-
-
-def initialize_ensemble(env_N, model_N, model_k, u0, std_init, m, key):
-    # fourier transform the initial condition
-    u0_f = jnp.fft.rfft(u0, axis=-1)
-    # get lower order
-    # make sure the magnitude of fourier modes match
-    u0_f_low = model_N / env_N * u0_f[: len(model_k)]
-    # create an ensemble by perturbing the real and imaginary parts
-    # with the given uncertainty
-    key, subkey = jax.random.split(key)
-    Af_0_real = jax.random.multivariate_normal(
-        key,
-        u0_f_low.real,
-        jnp.diag((u0_f_low.real * std_init) ** 2),
-        (m,),
-        method="svd",
-    ).T
-    # covariance matrix is rank deficient because zeroth
-    Af_0_complex = jax.random.multivariate_normal(
-        subkey,
-        u0_f_low.imag,
-        jnp.diag((u0_f_low.imag * std_init) ** 2),
-        (m,),
-        method="svd",
-    ).T
-    Af_0 = Af_0_real + Af_0_complex * 1j
-    return Af_0
 
 
 def draw_initial_condition(u0, std_init, key):
@@ -195,93 +141,7 @@ def draw_initial_condition(u0, std_init, key):
     return u0
 
 
-def get_observation_matrix(model_N, model_L, x):
-    # get the matrix to do inverse fft on observation points
-    k = model_N * jnp.fft.fftfreq(model_N) * 2 * jnp.pi / model_L
-    k_x = jnp.einsum("i,j->ij", x, k) * 1j
-    exp_k_x = jnp.exp(k_x)
-    M = 1 / model_N * exp_k_x
-    return M
-
-
-def ensemble_to_state(state_ens):
-    state = jnp.mean(state_ens, axis=-1)
-    # inverse rfft before passing to the neural network
-    state = jnp.fft.irfft(state)
-    return state
-
-
-def forecast(state_ens, action, frame_skip, B, lin, ik, dt):
-    """
-    Forecast the state ensemble over a number of steps.
-
-    Args:
-        state_ens: Ensemble of states. Shape [n_ensemble, n_state].
-        action: Action applied to the system.
-        frame_skip: Number of steps to advance.
-        B, lin, ik, dt: KS model parameters.
-
-    Returns:
-        Updated state ensemble.
-    """
-
-    def step_fn(state, _):
-        return (
-            jax.vmap(
-                KS.advance_f, in_axes=(-1, None, None, None, None, None), out_axes=-1
-            )(state, action, B, lin, ik, dt),
-            None,
-        )
-
-    # Use lax.scan to iterate over frame_skip and advance the state
-    state_ens, _ = jax.lax.scan(step_fn, state_ens, jnp.arange(frame_skip))
-
-    return state_ens
-
-
-def EnKF(m, Af, d, Cdd, M, key):
-    """Taken from real-time-bias-aware-DA by Novoa.
-    Ensemble Kalman Filter as derived in Evensen (2009) eq. 9.27.
-    Inputs:
-        Af: forecast ensemble at time t
-        d: observation at time t
-        Cdd: observation error covariance matrix
-        M: matrix mapping from state to observation space
-    Returns:
-        Aa: analysis ensemble
-    """
-    psi_f_m = jnp.mean(Af, 1, keepdims=True)
-    Psi_f = Af - psi_f_m
-
-    # Create an ensemble of observations
-    D = jax.random.multivariate_normal(key, d, Cdd, (m,), method="svd").T
-    # Mapped forecast matrix M(Af) and mapped deviations M(Af')
-    Y = jnp.real(jnp.dot(M, Af))
-    S = jnp.real(jnp.dot(M, Psi_f))
-    # because we are multiplying with M first, we get real values
-    # so we never actually compute the covariance of the complex-valued state
-    # if i have to do that, then make sure to do it properly with the complex conjugate!!
-    # Matrix to invert
-    C = (m - 1) * Cdd + jnp.dot(S, S.T)
-    # Cinv = jnp.linalg.inv(C)
-
-    # X = jnp.dot(S.T, jnp.dot(Cinv, (D - Y)))
-    X = jnp.dot(S.T, jnp.linalg.solve(C, D - Y))
-
-    Aa = Af + jnp.dot(Af, X)
-    return Aa
-
-
-def apply_enKF(m, k, Af, d, Cdd, M, key):
-    Af_full = jnp.vstack((Af, jnp.conjugate(jnp.flip(Af[1:-1, :], axis=0))))
-    Aa_full = EnKF(m, Af_full, d, Cdd, M, key)
-    Aa = Aa_full[:k, :]
-    return Aa
-
-
-def run_experiment(
-    config, env, agent, model, wandb_run=None, logs=None, checkpoint_dir=None
-):
+def run_experiment(config, env, agent, wandb_run=None, logs=None, checkpoint_dir=None):
     # random seed for initialization
     key = jax.random.PRNGKey(config.seed)
     key, key_network, key_buffer, key_env, key_obs, key_action = jax.random.split(
@@ -290,7 +150,7 @@ def run_experiment(
 
     # initialize networks
     # sample state and action to get the correct shape
-    state_0 = jnp.array([jnp.zeros(model.N)])
+    state_0 = jnp.array([jnp.zeros(env.num_observations)])
     action_0 = jnp.array([jnp.zeros(env.action_size)])
     actor_state, critic_state = agent.initial_network_state(
         key_network, state_0, action_0
@@ -312,13 +172,10 @@ def run_experiment(
     # initialize buffer
     replay_buffer = init_replay_buffer(
         capacity=config.replay_buffer.capacity,
-        state_dim=(model.N,),
+        state_dim=(env.num_observations,),
         action_dim=(env.action_size,),
         rng_key=key_buffer,
     )
-
-    # get the observation matrix that maps state to observations
-    obs_mat = get_observation_matrix(model.N, model.L, env.observation_locs)
 
     # standard deviation of the exploration scales with the range of actions in the environment
     exploration_stddev = (
@@ -329,15 +186,6 @@ def run_experiment(
     null_action = jnp.zeros(env.action_size)
 
     # jit the necessary environment functions
-    model_initialize_ensemble = partial(
-        initialize_ensemble,
-        env_N=env.N,
-        model_N=model.N,
-        model_k=model.k,
-        std_init=config.enKF.std_init,
-        m=config.enKF.m,
-    )
-    model_initialize_ensemble = jax.jit(model_initialize_ensemble)
     env_draw_initial_condition = partial(
         draw_initial_condition,
         std_init=config.enKF.std_init,
@@ -378,78 +226,37 @@ def run_experiment(
     )
     env_sample_action = jax.jit(env_sample_action)
 
-    model_forecast = partial(
-        forecast,
-        frame_skip=env.frame_skip,
-        B=model.B,
-        lin=model.lin,
-        ik=model.ik,
-        dt=model.dt,
-    )
-    model_forecast = jax.jit(model_forecast)
-
-    model_apply_enKF = partial(
-        apply_enKF,
-        m=config.enKF.m,
-        k=len(model.k),
-        M=obs_mat,
-    )
-    model_apply_enKF = jax.jit(model_apply_enKF)
-
-    def until_first_observation(true_state, true_obs, state_ens, observation_starts):
+    def until_first_observation(true_state, true_obs, observation_starts):
         def body_fun(carry, _):
-            true_state, true_obs, state_ens = carry
+            true_state, true_obs = carry
             # advance true environment
             action = null_action
             true_state, true_obs, _, _, _, _ = env_step(state=true_state, action=action)
-            # advance model
-            state_ens = model_forecast(state_ens=state_ens, action=action)
-            return (true_state, true_obs, state_ens), (
-                true_state,
-                true_obs,
-                state_ens,
-                action,
-            )
+            return (true_state, true_obs), (true_state, true_obs, action)
 
-        (true_state, true_obs, state_ens), (
+        (true_state, true_obs), (
             true_state_arr,
             true_obs_arr,
-            state_ens_arr,
             action_arr,
         ) = jax.lax.scan(
-            body_fun, (true_state, true_obs, state_ens), jnp.arange(observation_starts)
+            body_fun, (true_state, true_obs), jnp.arange(observation_starts)
         )
-        return (
-            true_state,
-            true_obs,
-            state_ens,
-            true_state_arr,
-            true_obs_arr,
-            state_ens_arr,
-            action_arr,
-        )
+        return (true_state, true_obs, true_state_arr, true_obs_arr, action_arr)
 
     def act_observe_and_forecast(
-        true_state, true_obs, state_ens, params, wait_steps, episode_steps, key_obs
+        true_state, true_obs, params, wait_steps, episode_steps, key_obs
     ):
         def forecast_fun(carry, _):
-            true_state, true_obs, state_ens = carry
-            state = ensemble_to_state(state_ens)
-
-            # get action
-            action = agent.actor.apply(params, state)
+            true_state, true_obs, action = carry
 
             # get the next observation and reward with this action
             true_state, true_obs, reward, _, _, _ = env_step(
                 state=true_state, action=action
             )
 
-            # forecast
-            state_ens = model_forecast(state_ens=state_ens, action=action)
-            return (true_state, true_obs, state_ens), (
+            return (true_state, true_obs, action), (
                 true_state,
                 true_obs,
-                state_ens,
                 action,
                 reward,
             )
@@ -458,55 +265,50 @@ def run_experiment(
             # observe
             # we got an observation
             # define observation covariance matrix
-            true_state, true_obs, state_ens, key_obs = carry
+            true_state, true_obs, key_obs = carry
             obs_cov = cov.get_max(std=config.enKF.std_obs, y=true_obs)
 
             # add noise on the observation
-            key_obs, key_enKF = jax.random.split(key_obs)
+            key_obs, _ = jax.random.split(key_obs)
             obs = jax.random.multivariate_normal(
                 key_obs, true_obs, obs_cov, method="svd"
             )
 
-            # apply enkf to correct the state estimation
-            state_ens = model_apply_enKF(Af=state_ens, d=obs, Cdd=obs_cov, key=key_enKF)
-            (true_state, true_obs, state_ens), (
+            # get action
+            action = agent.actor.apply(params, obs)
+
+            # propagate environment with the given action
+            (true_state, true_obs, action), (
                 true_state_arr,
                 true_obs_arr,
-                state_ens_arr,
                 action_arr,
                 reward_arr,
             ) = jax.lax.scan(
-                forecast_fun, (true_state, true_obs, state_ens), jnp.arange(wait_steps)
+                forecast_fun, (true_state, true_obs, action), jnp.arange(wait_steps)
             )
-            return (true_state, true_obs, state_ens, key_obs), (
+            return (true_state, true_obs, key_obs), (
                 true_state_arr,
                 true_obs_arr,
                 obs,
-                state_ens_arr,
                 action_arr,
                 reward_arr,
             )
 
         n_loops = episode_steps // wait_steps
-        (true_state, true_obs, state_ens, key_obs), (
+        (true_state, true_obs, key_obs), (
             true_state_arr,
             true_obs_arr,
             obs_arr,
-            state_ens_arr,
             action_arr,
             reward_arr,
-        ) = jax.lax.scan(
-            body_fun, (true_state, true_obs, state_ens, key_obs), jnp.arange(n_loops)
-        )
+        ) = jax.lax.scan(body_fun, (true_state, true_obs, key_obs), jnp.arange(n_loops))
         return (
             true_state,
             true_obs,
-            state_ens,
             key_obs,
             true_state_arr,
             true_obs_arr,
             obs_arr,
-            state_ens_arr,
             action_arr,
             reward_arr,
         )
@@ -514,7 +316,7 @@ def run_experiment(
     def random_observe_and_forecast(
         true_state,
         true_obs,
-        state_ens,
+        obs,
         wait_steps,
         episode_steps,
         key_obs,
@@ -522,98 +324,85 @@ def run_experiment(
         replay_buffer,
     ):
         def forecast_fun(carry, _):
-            true_state, true_obs, state_ens, key_action, replay_buffer = carry
-            state = ensemble_to_state(state_ens)
+            true_state, true_obs, action = carry
+
+            # get the next observation and reward with this action
+            true_state, true_obs, reward, terminated, _, _ = env_step(
+                state=true_state, action=action
+            )
+
+            return (true_state, true_obs, action), (
+                true_state,
+                true_obs,
+                action,
+                reward,
+                terminated,
+            )
+
+        def body_fun(carry, _):
+            # observe
+            # we got an observation
+            true_state, true_obs, obs, key_obs, key_action, replay_buffer = carry
 
             # get action
             key_action, _ = jax.random.split(key_action)
             action = env_sample_action(key=key_action)
 
-            # get the next observation and reward with this action
-            next_true_state, next_true_obs, reward, terminated, _, _ = env_step(
-                state=true_state, action=action
+            # propagate environment with the given action
+            (next_true_state, next_true_obs, action), (
+                true_state_arr,
+                true_obs_arr,
+                action_arr,
+                reward_arr,
+                terminated_arr,
+            ) = jax.lax.scan(
+                forecast_fun,
+                (true_state, true_obs, action),
+                jnp.arange(wait_steps),
             )
 
-            # forecast
-            next_state_ens = model_forecast(state_ens=state_ens, action=action)
-            next_state = ensemble_to_state(next_state_ens)
+            obs_cov = cov.get_max(std=config.enKF.std_obs, y=next_true_obs)
 
+            # add noise on the observation
+            key_obs, _ = jax.random.split(key_obs)
+            next_obs = jax.random.multivariate_normal(
+                key_obs, next_true_obs, obs_cov, method="svd"
+            )
+
+            # add
             replay_buffer = add_experience(
-                replay_buffer, state, action, reward, next_state, terminated
+                replay_buffer, obs, action, reward_arr[-1], next_obs, terminated_arr[-1]
             )
             return (
                 next_true_state,
                 next_true_obs,
-                next_state_ens,
-                key_action,
-                replay_buffer,
-            ), (true_state, true_obs, state_ens, action, reward)
-
-        def body_fun(carry, _):
-            # observe
-            # we got an observation
-            # define observation covariance matrix
-            true_state, true_obs, state_ens, key_obs, key_action, replay_buffer = carry
-            obs_cov = cov.get_max(std=config.enKF.std_obs, y=true_obs)
-
-            # add noise on the observation
-            key_obs, key_enKF = jax.random.split(key_obs)
-            obs = jax.random.multivariate_normal(
-                key_obs, true_obs, obs_cov, method="svd"
-            )
-
-            # apply enkf to correct the state estimation
-            state_ens = model_apply_enKF(Af=state_ens, d=obs, Cdd=obs_cov, key=key_enKF)
-            (true_state, true_obs, state_ens, key_action, replay_buffer), (
-                true_state_arr,
-                true_obs_arr,
-                state_ens_arr,
-                action_arr,
-                reward_arr,
-            ) = jax.lax.scan(
-                forecast_fun,
-                (true_state, true_obs, state_ens, key_action, replay_buffer),
-                jnp.arange(wait_steps),
-            )
-            return (
-                true_state,
-                true_obs,
-                state_ens,
+                next_obs,
                 key_obs,
                 key_action,
                 replay_buffer,
-            ), (
-                true_state_arr,
-                true_obs_arr,
-                obs,
-                state_ens_arr,
-                action_arr,
-                reward_arr,
-            )
+            ), (true_state_arr, true_obs_arr, next_obs, action_arr, reward_arr)
 
         n_loops = episode_steps // wait_steps
-        (true_state, true_obs, state_ens, key_obs, key_action, replay_buffer), (
+        (true_state, true_obs, obs, key_obs, key_action, replay_buffer), (
             true_state_arr,
             true_obs_arr,
             obs_arr,
-            state_ens_arr,
             action_arr,
             reward_arr,
         ) = jax.lax.scan(
             body_fun,
-            (true_state, true_obs, state_ens, key_obs, key_action, replay_buffer),
+            (true_state, true_obs, obs, key_obs, key_action, replay_buffer),
             jnp.arange(n_loops),
         )
         return (
             true_state,
             true_obs,
-            state_ens,
+            obs,
             key_obs,
             key_action,
             true_state_arr,
             true_obs_arr,
             obs_arr,
-            state_ens_arr,
             action_arr,
             reward_arr,
             replay_buffer,
@@ -622,7 +411,7 @@ def run_experiment(
     def learn_observe_and_forecast(
         true_state,
         true_obs,
-        state_ens,
+        obs,
         wait_steps,
         episode_steps,
         key_obs,
@@ -632,20 +421,36 @@ def run_experiment(
         critic_state,
     ):
         def forecast_fun(carry, _):
+            true_state, true_obs, action = carry
+
+            # get the next observation and reward with this action
+            true_state, true_obs, reward, terminated, _, _ = env_step(
+                state=true_state, action=action
+            )
+
+            return (true_state, true_obs, action), (
+                true_state,
+                true_obs,
+                action,
+                reward,
+                terminated,
+            )
+
+        def body_fun(carry, _):
+            # observe
+            # we got an observation
             (
                 true_state,
                 true_obs,
-                state_ens,
+                obs,
+                key_obs,
                 key_action,
                 replay_buffer,
                 actor_state,
                 critic_state,
             ) = carry
-
-            state = ensemble_to_state(state_ens)
-
             # get action from the learning actor network
-            action = agent.actor.apply(actor_state.params, state)
+            action = agent.actor.apply(actor_state.params, obs)
 
             # add exploration noise on the action
             # original paper adds Ornstein-Uhlenbeck process noise
@@ -655,17 +460,31 @@ def run_experiment(
             # clip the action so that it obeys the limits set by the environment
             action = jnp.clip(action, min=env.action_low, max=env.action_high)
 
-            # get the next observation and reward with this action
-            next_true_state, next_true_obs, reward, terminated, _, _ = env_step(
-                state=true_state, action=action
+            # propagate environment with the given action
+            (next_true_state, next_true_obs, action), (
+                true_state_arr,
+                true_obs_arr,
+                action_arr,
+                reward_arr,
+                terminated_arr,
+            ) = jax.lax.scan(
+                forecast_fun,
+                (true_state, true_obs, action),
+                jnp.arange(wait_steps),
             )
 
-            # forecast
-            next_state_ens = model_forecast(state_ens=state_ens, action=action)
-            next_state = ensemble_to_state(next_state_ens)
+            # define observation covariance matrix
+            obs_cov = cov.get_max(std=config.enKF.std_obs, y=next_true_obs)
 
+            # add noise on the observation
+            key_obs, _ = jax.random.split(key_obs)
+            next_obs = jax.random.multivariate_normal(
+                key_obs, next_true_obs, obs_cov, method="svd"
+            )
+
+            # add
             replay_buffer = add_experience(
-                replay_buffer, state, action, reward, next_state, terminated
+                replay_buffer, obs, action, reward_arr[-1], next_obs, terminated_arr[-1]
             )
 
             sampled, replay_buffer = sample_experiences(
@@ -697,70 +516,7 @@ def run_experiment(
             return (
                 next_true_state,
                 next_true_obs,
-                next_state_ens,
-                key_action,
-                replay_buffer,
-                actor_state,
-                critic_state,
-            ), (true_state, true_obs, state_ens, action, reward, q_loss, policy_loss)
-
-        def body_fun(carry, _):
-            # observe
-            # we got an observation
-            # define observation covariance matrix
-            (
-                true_state,
-                true_obs,
-                state_ens,
-                key_obs,
-                key_action,
-                replay_buffer,
-                actor_state,
-                critic_state,
-            ) = carry
-            obs_cov = cov.get_max(std=config.enKF.std_obs, y=true_obs)
-
-            # add noise on the observation
-            key_obs, key_enKF = jax.random.split(key_obs)
-            obs = jax.random.multivariate_normal(
-                key_obs, true_obs, obs_cov, method="svd"
-            )
-
-            # apply enkf to correct the state estimation
-            state_ens = model_apply_enKF(Af=state_ens, d=obs, Cdd=obs_cov, key=key_enKF)
-            (
-                true_state,
-                true_obs,
-                state_ens,
-                key_action,
-                replay_buffer,
-                actor_state,
-                critic_state,
-            ), (
-                true_state_arr,
-                true_obs_arr,
-                state_ens_arr,
-                action_arr,
-                reward_arr,
-                q_loss_arr,
-                policy_loss_arr,
-            ) = jax.lax.scan(
-                forecast_fun,
-                (
-                    true_state,
-                    true_obs,
-                    state_ens,
-                    key_action,
-                    replay_buffer,
-                    actor_state,
-                    critic_state,
-                ),
-                jnp.arange(wait_steps),
-            )
-            return (
-                true_state,
-                true_obs,
-                state_ens,
+                next_obs,
                 key_obs,
                 key_action,
                 replay_buffer,
@@ -769,19 +525,18 @@ def run_experiment(
             ), (
                 true_state_arr,
                 true_obs_arr,
-                obs,
-                state_ens_arr,
+                next_obs,
                 action_arr,
                 reward_arr,
-                q_loss_arr,
-                policy_loss_arr,
+                q_loss,
+                policy_loss,
             )
 
         n_loops = episode_steps // wait_steps
         (
             true_state,
             true_obs,
-            state_ens,
+            obs,
             key_obs,
             key_action,
             replay_buffer,
@@ -791,7 +546,6 @@ def run_experiment(
             true_state_arr,
             true_obs_arr,
             obs_arr,
-            state_ens_arr,
             action_arr,
             reward_arr,
             q_loss_arr,
@@ -801,7 +555,7 @@ def run_experiment(
             (
                 true_state,
                 true_obs,
-                state_ens,
+                obs,
                 key_obs,
                 key_action,
                 replay_buffer,
@@ -813,13 +567,12 @@ def run_experiment(
         return (
             true_state,
             true_obs,
-            state_ens,
+            obs,
             key_obs,
             key_action,
             true_state_arr,
             true_obs_arr,
             obs_arr,
-            state_ens_arr,
             action_arr,
             reward_arr,
             q_loss_arr,
@@ -857,43 +610,33 @@ def run_experiment(
 
     def act_episode(key_env, key_obs, params):
         # reset the environment
-        key_env, key_ens, key_init = jax.random.split(key_env, 3)
+        key_env, _, key_init = jax.random.split(key_env, 3)
         init_true_state_mean, _, _ = env_reset(key=key_env)
         init_true_state = env_draw_initial_condition(
             u0=init_true_state_mean, key=key_init
         )
         init_true_obs = init_true_state[env.observation_inds]
 
-        # initialize enKF
-        init_state_ens = model_initialize_ensemble(u0=init_true_state_mean, key=key_ens)
-
         # forecast until first observation
         (
             true_state,
             true_obs,
-            state_ens,
             true_state_arr0,
             true_obs_arr0,
-            state_ens_arr0,
             action_arr0,
-        ) = until_first_observation(
-            true_state=init_true_state, true_obs=init_true_obs, state_ens=init_state_ens
-        )
+        ) = until_first_observation(true_state=init_true_state, true_obs=init_true_obs)
         (
             true_state,
             true_obs,
-            state_ens,
             key_obs,
             true_state_arr,
             true_obs_arr,
             obs_arr,
-            state_ens_arr,
             action_arr,
             reward_arr,
         ) = act_observe_and_forecast(
             true_state=true_state,
             true_obs=true_obs,
-            state_ens=state_ens,
             params=params,
             key_obs=key_obs,
         )
@@ -909,14 +652,6 @@ def run_experiment(
             true_obs_arr,
             (true_obs_arr.shape[0] * true_obs_arr.shape[1], true_obs_arr.shape[2]),
         )
-        state_ens_arr = jnp.reshape(
-            state_ens_arr,
-            (
-                state_ens_arr.shape[0] * state_ens_arr.shape[1],
-                state_ens_arr.shape[2],
-                state_ens_arr.shape[3],
-            ),
-        )
         action_arr = jnp.reshape(
             action_arr,
             (action_arr.shape[0] * action_arr.shape[1], action_arr.shape[2]),
@@ -931,7 +666,6 @@ def run_experiment(
             stack(init_true_state, true_state_arr0, true_state_arr),
             stack(init_true_obs, true_obs_arr0, true_obs_arr),
             obs_arr,
-            stack(init_state_ens, state_ens_arr0, state_ens_arr),
             stack(null_action, action_arr0, action_arr),
             reward_arr,
             key_env,
@@ -940,45 +674,45 @@ def run_experiment(
 
     def random_episode(key_env, key_obs, key_action, replay_buffer):
         # reset the environment
-        key_env, key_ens, key_init = jax.random.split(key_env, 3)
+        key_env, _, key_init = jax.random.split(key_env, 3)
         init_true_state_mean, _, _ = env_reset(key=key_env)
         init_true_state = env_draw_initial_condition(
             u0=init_true_state_mean, key=key_init
         )
         init_true_obs = init_true_state[env.observation_inds]
 
-        # initialize enKF
-        init_state_ens = model_initialize_ensemble(u0=init_true_state_mean, key=key_ens)
-
         # forecast until first observation
         (
             true_state,
             true_obs,
-            state_ens,
             true_state_arr0,
             true_obs_arr0,
-            state_ens_arr0,
             action_arr0,
-        ) = until_first_observation(
-            true_state=init_true_state, true_obs=init_true_obs, state_ens=init_state_ens
+        ) = until_first_observation(true_state=init_true_state, true_obs=init_true_obs)
+        obs_cov = cov.get_max(std=config.enKF.std_obs, y=true_obs)
+
+        # add noise on the observation
+        key_obs, _ = jax.random.split(key_obs)
+        first_obs = jax.random.multivariate_normal(
+            key_obs, true_obs, obs_cov, method="svd"
         )
+
         (
             true_state,
             true_obs,
-            state_ens,
+            obs,
             key_obs,
             key_action,
             true_state_arr,
             true_obs_arr,
             obs_arr,
-            state_ens_arr,
             action_arr,
             reward_arr,
             replay_buffer,
         ) = random_observe_and_forecast(
             true_state=true_state,
             true_obs=true_obs,
-            state_ens=state_ens,
+            obs=first_obs,
             key_obs=key_obs,
             key_action=key_action,
             replay_buffer=replay_buffer,
@@ -995,14 +729,6 @@ def run_experiment(
             true_obs_arr,
             (true_obs_arr.shape[0] * true_obs_arr.shape[1], true_obs_arr.shape[2]),
         )
-        state_ens_arr = jnp.reshape(
-            state_ens_arr,
-            (
-                state_ens_arr.shape[0] * state_ens_arr.shape[1],
-                state_ens_arr.shape[2],
-                state_ens_arr.shape[3],
-            ),
-        )
         action_arr = jnp.reshape(
             action_arr,
             (action_arr.shape[0] * action_arr.shape[1], action_arr.shape[2]),
@@ -1013,12 +739,12 @@ def run_experiment(
         )
 
         stack = lambda a, b, c: jnp.vstack((jnp.expand_dims(a, axis=0), b, c))
+        stack2 = lambda a, b: jnp.vstack((jnp.expand_dims(a, axis=0), b))
 
         return (
             stack(init_true_state, true_state_arr0, true_state_arr),
             stack(init_true_obs, true_obs_arr0, true_obs_arr),
-            obs_arr,
-            stack(init_state_ens, state_ens_arr0, state_ens_arr),
+            stack2(first_obs, obs_arr),
             stack(null_action, action_arr0, action_arr),
             reward_arr,
             replay_buffer,
@@ -1031,38 +757,38 @@ def run_experiment(
         key_env, key_obs, key_action, replay_buffer, actor_state, critic_state
     ):
         # reset the environment
-        key_env, key_ens, key_init = jax.random.split(key_env, 3)
+        key_env, _, key_init = jax.random.split(key_env, 3)
         init_true_state_mean, _, _ = env_reset(key=key_env)
         init_true_state = env_draw_initial_condition(
             u0=init_true_state_mean, key=key_init
         )
         init_true_obs = init_true_state[env.observation_inds]
 
-        # initialize enKF
-        init_state_ens = model_initialize_ensemble(u0=init_true_state_mean, key=key_ens)
-
         # forecast until first observation
         (
             true_state,
             true_obs,
-            state_ens,
             true_state_arr0,
             true_obs_arr0,
-            state_ens_arr0,
             action_arr0,
-        ) = until_first_observation(
-            true_state=init_true_state, true_obs=init_true_obs, state_ens=init_state_ens
+        ) = until_first_observation(true_state=init_true_state, true_obs=init_true_obs)
+
+        obs_cov = cov.get_max(std=config.enKF.std_obs, y=true_obs)
+
+        # add noise on the observation
+        key_obs, _ = jax.random.split(key_obs)
+        first_obs = jax.random.multivariate_normal(
+            key_obs, true_obs, obs_cov, method="svd"
         )
         (
             true_state,
             true_obs,
-            state_ens,
+            obs,
             key_obs,
             key_action,
             true_state_arr,
             true_obs_arr,
             obs_arr,
-            state_ens_arr,
             action_arr,
             reward_arr,
             q_loss_arr,
@@ -1073,7 +799,7 @@ def run_experiment(
         ) = learn_observe_and_forecast(
             true_state=true_state,
             true_obs=true_obs,
-            state_ens=state_ens,
+            obs=first_obs,
             key_obs=key_obs,
             key_action=key_action,
             replay_buffer=replay_buffer,
@@ -1094,14 +820,6 @@ def run_experiment(
             (true_obs_arr.shape[0] * true_obs_arr.shape[1], true_obs_arr.shape[2]),
         )
 
-        state_ens_arr = jnp.reshape(
-            state_ens_arr,
-            (
-                state_ens_arr.shape[0] * state_ens_arr.shape[1],
-                state_ens_arr.shape[2],
-                state_ens_arr.shape[3],
-            ),
-        )
         action_arr = jnp.reshape(
             action_arr,
             (action_arr.shape[0] * action_arr.shape[1], action_arr.shape[2]),
@@ -1111,23 +829,13 @@ def run_experiment(
             (reward_arr.shape[0] * reward_arr.shape[1],),
         )
 
-        q_loss_arr = jnp.reshape(
-            q_loss_arr,
-            (q_loss_arr.shape[0] * q_loss_arr.shape[1],),
-        )
-
-        policy_loss_arr = jnp.reshape(
-            policy_loss_arr,
-            (policy_loss_arr.shape[0] * policy_loss_arr.shape[1],),
-        )
-
         stack = lambda a, b, c: jnp.vstack((jnp.expand_dims(a, axis=0), b, c))
+        stack2 = lambda a, b: jnp.vstack((jnp.expand_dims(a, axis=0), b))
 
         return (
             stack(init_true_state, true_state_arr0, true_state_arr),
             stack(init_true_obs, true_obs_arr0, true_obs_arr),
-            obs_arr,
-            stack(init_state_ens, state_ens_arr0, state_ens_arr),
+            stack2(first_obs, obs_arr),
             stack(null_action, action_arr0, action_arr),
             reward_arr,
             q_loss_arr,
@@ -1147,7 +855,6 @@ def run_experiment(
             true_state_arr,
             true_obs_arr,
             obs_arr,
-            state_ens_arr,
             action_arr,
             reward_arr,
             replay_buffer,
@@ -1165,22 +872,20 @@ def run_experiment(
         # if i == 0:
         fig = plot_KS_episode(
             env,
-            model,
             true_state_arr,
             true_obs_arr,
             obs_arr,
-            state_ens_arr,
             action_arr,
             reward_arr,
             config.enKF.wait_steps,
             config.enKF.observation_starts,
         )
+
         fig.savefig(FLAGS.experiment_path / f"random_episode_{i+1}.png")
         episode_dict = {
             "true_state": true_state_arr,
             "true_obs": true_obs_arr,
             "obs": obs_arr,
-            "state_ens": state_ens_arr,
             "action": action_arr,
             "reward": reward_arr,
         }
@@ -1203,7 +908,6 @@ def run_experiment(
             true_state_arr,
             true_obs_arr,
             obs_arr,
-            state_ens_arr,
             action_arr,
             reward_arr,
             q_loss_arr,
@@ -1228,11 +932,9 @@ def run_experiment(
         if i == 0 or (i + 1) % n_plot == 0:
             fig = plot_KS_episode(
                 env,
-                model,
                 true_state_arr,
                 true_obs_arr,
                 obs_arr,
-                state_ens_arr,
                 action_arr,
                 reward_arr,
                 config.enKF.wait_steps,
@@ -1243,7 +945,6 @@ def run_experiment(
                 "true_state": true_state_arr,
                 "true_obs": true_obs_arr,
                 "obs": obs_arr,
-                "state_ens": state_ens_arr,
                 "action": action_arr,
                 "reward": reward_arr,
             }
@@ -1274,7 +975,6 @@ def run_experiment(
                     true_state_arr,
                     true_obs_arr,
                     obs_arr,
-                    state_ens_arr,
                     action_arr,
                     reward_arr,
                     key_env,
@@ -1286,11 +986,9 @@ def run_experiment(
                 if (i + 1) % n_plot == 0 and j == 0:
                     fig = plot_KS_episode(
                         env,
-                        model,
                         true_state_arr,
                         true_obs_arr,
                         obs_arr,
-                        state_ens_arr,
                         action_arr,
                         reward_arr,
                         config.enKF.wait_steps,
@@ -1313,7 +1011,6 @@ def run_experiment(
                 true_state_arr,
                 true_obs_arr,
                 obs_arr,
-                state_ens_arr,
                 action_arr,
                 reward_arr,
                 key_env,
@@ -1324,11 +1021,9 @@ def run_experiment(
             final_eval_last_reward = reward_arr[-1]
             fig = plot_KS_episode(
                 env,
-                model,
                 true_state_arr,
                 true_obs_arr,
                 obs_arr,
-                state_ens_arr,
                 action_arr,
                 reward_arr,
                 config.enKF.wait_steps,
@@ -1343,7 +1038,6 @@ def run_experiment(
                 "true_state": true_state_arr,
                 "true_obs": true_obs_arr,
                 "obs": obs_arr,
-                "state_ens": state_ens_arr,
                 "action": action_arr,
                 "reward": reward_arr,
             }
@@ -1419,17 +1113,8 @@ def main(_):
     agent = DDPG(config, env)
     print("Starting experiment.", flush=True)
 
-    # create low order model
-    model = KS(
-        nu=config.env.nu,
-        N=config.enKF.low_order_N,
-        dt=env.dt,
-        actuator_locs=config.env.actuator_locs,
-        actuator_scale=config.env.actuator_scale,
-    )
-
     actor_state, critic_state = run_experiment(
-        config, env, agent, model, wandb_run, logs, checkpoint_dir
+        config, env, agent, wandb_run, logs, checkpoint_dir
     )
 
     # save the final model weights

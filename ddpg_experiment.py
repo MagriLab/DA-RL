@@ -47,7 +47,7 @@ _WANDB = config_flags.DEFINE_config_file(
     "wandb_config", "configs/wandb_config.py", "Contains configs to log to wandb."
 )
 _ENV = config_flags.DEFINE_config_file(
-    "env_config", None, "Contains configs for the environment."
+    "env_config", "configs/KS_config.py", "Contains configs for the environment."
 )
 
 # flags.mark_flags_as_required(['config'])

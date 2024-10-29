@@ -61,7 +61,8 @@ class KS:
     def advance_f(self, u, action):
         # just advances the fourier coefficients
         f0 = self.B @ action
-        f = np.fft.rfft(f0, axis=-1)
+        f_fine = np.fft.rfft(f0, axis=-1)
+        f = self.n / self.n_fine * f_fine[: len(self.k)]
         u_save = np.copy(u)
         for n in range(3):
             dt = self.dt / (3 - n)
@@ -84,11 +85,11 @@ class KS:
             print(f'Action dtype {action.dtype} || B dtype {self.B.dtype}')
         """
         f0 = self.B @ action
-
+        f_fine = np.fft.rfft(f0, axis=-1)
+        f = self.n / self.n_fine * f_fine[: len(self.k)]
         # semi-implicit third-order runge kutta update.
         # ref: http://journals.ametsoc.org/doi/pdf/10.1175/MWR3214.1
         u = np.fft.rfft(u0, axis=-1)
-        f = np.fft.rfft(f0, axis=-1)
         u_save = np.copy(u)
         for n in range(3):
             dt = self.dt / (3 - n)
@@ -106,10 +107,17 @@ class KS:
         :param loc: Float
         :return: np.array of shape self.x.shape
         """
-        y = np.zeros(self.x.shape)
+        self.n_fine = max(64, self.n)
+        x_fine = np.arange(self.n_fine) * self.L / self.n_fine
+        y = np.zeros(x_fine.shape)
+        y_max = 0
         for shift in range(-3, 3):
-            y += normal_pdf(self.x + shift * self.L, loc, self.scale)
-        y = y / np.max(y)
+            y += normal_pdf(x_fine + shift * self.L, loc, self.scale)
+            # compute y_max by looking at the peak
+            # this is to ensure that the max is the same even when the grid points
+            # don't align with the actuator locations
+            y_max += normal_pdf(loc + shift * self.L, loc, self.scale)
+        y = y / y_max  # Normalize the distribution
         return y
 
 
