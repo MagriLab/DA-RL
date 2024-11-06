@@ -25,10 +25,13 @@ from envs.KS_environment_jax import KSenv
 from replay_buffer_jax import add_experience, init_replay_buffer, sample_experiences
 from utils import visualizations as vis
 from utils import covariance_matrix as cov
+from utils.system import set_gpu
 
 # system config
 FLAGS = flags.FLAGS
 myflags.DEFINE_path("experiment_path", None, "Directory to store experiment results.")
+flags.DEFINE_integer("gpu_id", None, "Which gpu to use.")
+flags.DEFINE_float("gpu_mem", 0.9, "Fraction of gpu memory to use.")
 flags.DEFINE_bool("log_wandb", False, "Use --log_wandb to log the experiment to wandb.")
 flags.DEFINE_bool(
     "log_offline", False, "Use --log_offline to log the experiment to local."
@@ -37,6 +40,16 @@ flags.DEFINE_bool(
     "save_checkpoints",
     False,
     "Use --save_checkpoints to save intermediate model weights.",
+)
+flags.DEFINE_bool(
+    "save_episode_data",
+    False,
+    "Use --save_episode_data to save the data from episodes.",
+)
+flags.DEFINE_bool(
+    "make_plots",
+    False,
+    "Use --make_plots to plot an episode and save it.",
 )
 _CONFIG = config_flags.DEFINE_config_file(
     "config", "configs/enKF_config.py", "Contains configs to run the experiment"
@@ -49,11 +62,6 @@ _ENV = config_flags.DEFINE_config_file(
 )
 
 # flags.mark_flags_as_required(['config'])
-
-
-def save_config():
-    with open(FLAGS.experiment_path / "config.yml", "w") as f:
-        FLAGS.config.to_yaml(stream=f)
 
 
 def log_metrics_wandb(wandb_run, metrics, step=None):
@@ -458,7 +466,7 @@ def run_experiment(config, env, agent, wandb_run=None, logs=None, checkpoint_dir
             key_action, _ = jax.random.split(key_action)
             action = add_gaussian_noise(key_action, action, stddev=exploration_stddev)
             # clip the action so that it obeys the limits set by the environment
-            action = jnp.clip(action, min=env.action_low, max=env.action_high)
+            action = jnp.clip(action, a_min=env.action_low, a_max=env.action_high)
 
             # propagate environment with the given action
             (next_true_state, next_true_obs, action), (
@@ -850,6 +858,7 @@ def run_experiment(config, env, agent, wandb_run=None, logs=None, checkpoint_dir
 
     # fill replay buffer with episodes with random inputs
     random_episodes = config.learning_starts // config.episode_steps
+    n_plot = config.plot_freq // config.episode_steps
     for i in range(random_episodes):
         (
             true_state_arr,
@@ -869,38 +878,40 @@ def run_experiment(config, env, agent, wandb_run=None, logs=None, checkpoint_dir
             f"Random input, Episode={i+1}/{random_episodes}, Return={random_return},  Average Reward={random_ave_reward}, Last Reward ={random_last_reward}",
             flush=True,
         )
-        # if i == 0:
-        fig = plot_KS_episode(
-            env,
-            true_state_arr,
-            true_obs_arr,
-            obs_arr,
-            action_arr,
-            reward_arr,
-            config.enKF.wait_steps,
-            config.enKF.observation_starts,
-        )
+        if i == 0 or (i + 1) % n_plot == 0:
+            if FLAGS.make_plots == True:
+                fig = plot_KS_episode(
+                    env,
+                    true_state_arr,
+                    true_obs_arr,
+                    obs_arr,
+                    action_arr,
+                    reward_arr,
+                    config.enKF.wait_steps,
+                    config.enKF.observation_starts,
+                )
 
-        fig.savefig(FLAGS.experiment_path / f"random_episode_{i+1}.png")
-        episode_dict = {
-            "true_state": true_state_arr,
-            "true_obs": true_obs_arr,
-            "obs": obs_arr,
-            "action": action_arr,
-            "reward": reward_arr,
-        }
-        fp.pickle_file(
-            FLAGS.experiment_path / "episode_data" / f"random_episode_{i+1}.pickle",
-            episode_dict,
-        )
-
+                fig.savefig(
+                    FLAGS.experiment_path / "plots" / f"random_episode_{i+1}.png"
+                )
+            if FLAGS.save_episode_data == True:
+                episode_dict = {
+                    "true_state": true_state_arr,
+                    "true_obs": true_obs_arr,
+                    "obs": obs_arr,
+                    "action": action_arr,
+                    "reward": reward_arr,
+                }
+                fp.write_h5(
+                    FLAGS.experiment_path / "episode_data" / f"random_episode_{i+1}.h5",
+                    episode_dict,
+                )
     print("\n")
     # learn and evaluate
     learn_episodes = (
         config.total_steps - config.learning_starts
     ) // config.episode_steps
     n_eval = config.eval_freq // config.episode_steps
-    n_plot = config.plot_freq // config.episode_steps
     learn_steps = config.episode_steps - config.enKF.observation_starts
     metrics = {"train": {}, "eval": {}}
     for i in range(learn_episodes):
@@ -930,28 +941,32 @@ def run_experiment(config, env, agent, wandb_run=None, logs=None, checkpoint_dir
         )
 
         if i == 0 or (i + 1) % n_plot == 0:
-            fig = plot_KS_episode(
-                env,
-                true_state_arr,
-                true_obs_arr,
-                obs_arr,
-                action_arr,
-                reward_arr,
-                config.enKF.wait_steps,
-                config.enKF.observation_starts,
-            )
-            fig.savefig(FLAGS.experiment_path / f"learn_episode_{i+1}.png")
-            episode_dict = {
-                "true_state": true_state_arr,
-                "true_obs": true_obs_arr,
-                "obs": obs_arr,
-                "action": action_arr,
-                "reward": reward_arr,
-            }
-            fp.pickle_file(
-                FLAGS.experiment_path / "episode_data" / f"learn_episode_{i+1}.pickle",
-                episode_dict,
-            )
+            if FLAGS.make_plots == True:
+                fig = plot_KS_episode(
+                    env,
+                    true_state_arr,
+                    true_obs_arr,
+                    obs_arr,
+                    action_arr,
+                    reward_arr,
+                    config.enKF.wait_steps,
+                    config.enKF.observation_starts,
+                )
+                fig.savefig(
+                    FLAGS.experiment_path / "plots" / f"learn_episode_{i+1}.png"
+                )
+            if FLAGS.save_episode_data == True:
+                episode_dict = {
+                    "true_state": true_state_arr,
+                    "true_obs": true_obs_arr,
+                    "obs": obs_arr,
+                    "action": action_arr,
+                    "reward": reward_arr,
+                }
+                fp.write_h5(
+                    FLAGS.experiment_path / "episode_data" / f"learn_episode_{i+1}.h5",
+                    episode_dict,
+                )
 
         for j, (q_loss, policy_loss) in enumerate(zip(q_loss_arr, policy_loss_arr)):
             metrics["q_loss"] = q_loss
@@ -984,17 +999,34 @@ def run_experiment(config, env, agent, wandb_run=None, logs=None, checkpoint_dir
                 eval_ave_reward += jnp.mean(reward_arr)
                 eval_ave_last_reward += reward_arr[-1]
                 if (i + 1) % n_plot == 0 and j == 0:
-                    fig = plot_KS_episode(
-                        env,
-                        true_state_arr,
-                        true_obs_arr,
-                        obs_arr,
-                        action_arr,
-                        reward_arr,
-                        config.enKF.wait_steps,
-                        config.enKF.observation_starts,
-                    )
-                    fig.savefig(FLAGS.experiment_path / f"eval_episode_{i+1}.png")
+                    if FLAGS.make_plots == True:
+                        fig = plot_KS_episode(
+                            env,
+                            true_state_arr,
+                            true_obs_arr,
+                            obs_arr,
+                            action_arr,
+                            reward_arr,
+                            config.enKF.wait_steps,
+                            config.enKF.observation_starts,
+                        )
+                        fig.savefig(
+                            FLAGS.experiment_path / "plots" / f"eval_episode_{i+1}.png"
+                        )
+                    if FLAGS.save_episode_data == True:
+                        episode_dict = {
+                            "true_state": true_state_arr,
+                            "true_obs": true_obs_arr,
+                            "obs": obs_arr,
+                            "action": action_arr,
+                            "reward": reward_arr,
+                        }
+                        fp.write_h5(
+                            FLAGS.experiment_path
+                            / "episode_data"
+                            / f"eval_episode_{i+1}.h5",
+                            episode_dict,
+                        )
             eval_ave_return = eval_ave_return / config.eval_episodes
             eval_ave_reward = eval_ave_reward / config.eval_episodes
             eval_ave_last_reward = eval_ave_last_reward / config.eval_episodes
@@ -1019,33 +1051,34 @@ def run_experiment(config, env, agent, wandb_run=None, logs=None, checkpoint_dir
             final_eval_return = jnp.sum(reward_arr)
             final_eval_ave_reward = jnp.mean(reward_arr)
             final_eval_last_reward = reward_arr[-1]
-            fig = plot_KS_episode(
-                env,
-                true_state_arr,
-                true_obs_arr,
-                obs_arr,
-                action_arr,
-                reward_arr,
-                config.enKF.wait_steps,
-                config.enKF.observation_starts,
-            )
-            fig.savefig(FLAGS.experiment_path / f"final_eval_episode.png")
+            if FLAGS.make_plots == True:
+                fig = plot_KS_episode(
+                    env,
+                    true_state_arr,
+                    true_obs_arr,
+                    obs_arr,
+                    action_arr,
+                    reward_arr,
+                    config.enKF.wait_steps,
+                    config.enKF.observation_starts,
+                )
+                fig.savefig(FLAGS.experiment_path / "plots" / f"final_eval_episode.png")
+            if FLAGS.save_episode_data == True:
+                episode_dict = {
+                    "true_state": true_state_arr,
+                    "true_obs": true_obs_arr,
+                    "obs": obs_arr,
+                    "action": action_arr,
+                    "reward": reward_arr,
+                }
+                fp.write_h5(
+                    FLAGS.experiment_path / "episode_data" / f"final_eval_episode.h5",
+                    episode_dict,
+                )
             print(
                 f"\n Final evaluation, Episode={i+1}/{learn_episodes}, Return={final_eval_return}, Average Reward={final_eval_ave_reward}, Last Reward ={final_eval_last_reward} \n ",
                 flush=True,
             )
-            episode_dict = {
-                "true_state": true_state_arr,
-                "true_obs": true_obs_arr,
-                "obs": obs_arr,
-                "action": action_arr,
-                "reward": reward_arr,
-            }
-            fp.pickle_file(
-                FLAGS.experiment_path / "episode_data" / f"final_eval_episode.pickle",
-                episode_dict,
-            )
-
         if wandb_run is not None:
             log_metrics_wandb(wandb_run, metrics, step=(i + 1) * learn_steps - 1)
         # checkpoint the model
@@ -1064,6 +1097,10 @@ def run_experiment(config, env, agent, wandb_run=None, logs=None, checkpoint_dir
 def main(_):
     config = FLAGS.config
 
+    # set up system
+    if FLAGS.gpu_id:
+        set_gpu(FLAGS.gpu_id, FLAGS.gpu_mem)
+
     if not FLAGS.experiment_path:
         now = datetime.now()
         dt_string = now.strftime("%Y%m%d_%H%M%S")
@@ -1073,8 +1110,14 @@ def main(_):
 
     # setup the experiment path
     FLAGS.experiment_path.mkdir(parents=True, exist_ok=True)
-    episode_data_path = FLAGS.experiment_path / "episode_data"
-    episode_data_path.mkdir(parents=True, exist_ok=True)
+
+    if FLAGS.make_plots == True:
+        plots_path = FLAGS.experiment_path / "plots"
+        plots_path.mkdir(parents=True, exist_ok=True)
+
+    if FLAGS.save_episode_data == True:
+        episode_data_path = FLAGS.experiment_path / "episode_data"
+        episode_data_path.mkdir(parents=True, exist_ok=True)
 
     # redirect print to text file
     orig_stdout = sys.stdout
@@ -1085,7 +1128,7 @@ def main(_):
     # add environment config to the config
     config.env = FLAGS.env_config
 
-    save_config()
+    fp.save_config(FLAGS.experiment_path, config)
 
     # initialize wandb logging
     if FLAGS.log_wandb:
@@ -1131,7 +1174,7 @@ def main(_):
 
     if FLAGS.log_offline:
         print(f"Saving logs to {FLAGS.experiment_path}.")
-        fp.pickle_file(FLAGS.experiment_path / "logs.pickle", logs)
+        fp.write_h5(FLAGS.experiment_path / "logs.h5", logs)
 
     # close text
     sys.stdout = orig_stdout

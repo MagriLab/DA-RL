@@ -357,6 +357,9 @@ def plot_episode(
     axs2[0, 0].legend(loc="upper center", bbox_to_anchor=(0.5, 1.3), ncols=2)
 
     for j in range(3):
+        axs2[j, 1].plot(obs_ens_arr[:, j, :], ":", linewidth=0.5)
+        axs2[j, 1].plot(true_obs_arr[:, j], color=true_color, label="True")
+        axs2[j, 1].plot(obs_mean_arr[:, j], "--", color=model_color, label="Model")
         axs2[j, 1].plot(
             obs_arr[:, j],
             marker="o",
@@ -365,9 +368,6 @@ def plot_episode(
             color=noisy_color,
             label="Noisy",
         )
-        axs2[j, 1].plot(obs_ens_arr[:, j, :], ":", linewidth=0.5)
-        axs2[j, 1].plot(true_obs_arr[:, j], color=true_color, label="True")
-        axs2[j, 1].plot(obs_mean_arr[:, j], "--", color=model_color, label="Model")
         axs2[j, 1].set_ylabel(f"u(x={x_obs[j]:.2f})")
         if j < 2:
             axs2[j, 1].set_xticklabels([])

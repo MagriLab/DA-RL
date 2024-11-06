@@ -10,7 +10,7 @@ def get_config():
 
     config.total_steps = 50000
     config.episode_steps = 1000
-    config.learning_starts = 5000
+    config.learning_starts = 10000
     config.eval_freq = 5000
     config.eval_episodes = 5
 

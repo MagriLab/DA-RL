@@ -56,7 +56,9 @@ class KSenv:
         self.initial_amplitude = initial_amplitude
 
         # Observations
-        self.observation_inds = [int(x) for x in (self.N / (2 * jnp.pi)) * sensor_locs]
+        self.observation_inds = [
+            int(jnp.round(x)) for x in (self.N / (2 * jnp.pi)) * sensor_locs
+        ]
         self.num_observations = len(self.observation_inds)
         assert len(self.observation_inds) == len(set(self.observation_inds))
         self.observation_inds = jnp.array(self.observation_inds)
@@ -230,7 +232,7 @@ if __name__ == "__main__":
     env = KSenv(
         nu=0.08,
         actuator_locs=jnp.array([0.0, jnp.pi / 4, jnp.pi / 2, 3 * jnp.pi / 4]),
-        sensor_locs=jnp.array([0.0, 1.0, 2.0]),
+        sensor_locs=jnp.array([0.0, jnp.pi / 4, jnp.pi / 2, 3 * jnp.pi / 4]),
         burn_in=0,
     )
     state, observation, _ = KSenv.reset(

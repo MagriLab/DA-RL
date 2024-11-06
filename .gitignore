@@ -4,4 +4,4 @@ __pycache__/
 .vscode/
 tmp_*
 local*
-
+.venv*
