@@ -5,7 +5,7 @@ import numpy as np
 def get_config():
     config = ml_collections.ConfigDict()
     config.N = 64
-    config.nu = 0.03
+    config.nu = 0.043
     config.actuator_scale = 0.3
     config.actuator_loss_weight = 1.0
     config.burn_in = 1000

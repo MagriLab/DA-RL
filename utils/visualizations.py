@@ -141,7 +141,7 @@ def plot_episode_wo_KF(
 
     # plot the energy, actuation energy and reward
     state_norm = jnp.linalg.norm(full_state_arr, axis=1)
-    axs1[0].plot(state_norm)
+    axs1[0].plot(state_norm, color=true_color)
     axs1[0].set_xticklabels([])
     axs1[0].set_ylabel("||u||")
     axs1[0].set_title(f"Final ||u|| = {state_norm[-1]:.2f}")
@@ -153,7 +153,7 @@ def plot_episode_wo_KF(
     axs1[1].set_ylabel("||a||")
     axs1[1].grid()
 
-    axs1[2].plot(reward_arr)
+    axs1[2].plot(reward_arr, color=true_color)
     axs1[2].set_ylabel("r(u,a)")
     axs1[2].grid()
     axs1[2].set_xlabel("t")
@@ -190,7 +190,7 @@ def plot_episode_wo_KF(
 
     # plot the actuation
     for j in range(3):
-        axs2[j, 2].plot(action_arr[:, j], color=true_color)
+        axs2[j, 2].plot(action_arr[:, j])
         axs2[j, 2].set_ylabel(f"a(x={x_act[j]:.2f})")
         if j < 2:
             axs2[j, 2].set_xticklabels([])
@@ -215,7 +215,8 @@ def plot_episode(
     obs_ens_arr,
     obs_mean_arr,
     action_arr,
-    reward_arr,
+    reward_env_arr,
+    reward_model_arr,
 ):
     # set the colours
     true_color = "black"
@@ -319,10 +320,11 @@ def plot_episode(
 
     # plot the energy, actuation energy and reward
     state_norm = jnp.linalg.norm(full_state_arr, axis=1)
-    axs1[0].plot(state_norm)
+    axs1[0].plot(state_norm, color=true_color, label="True")
     axs1[0].set_xticklabels([])
     axs1[0].set_ylabel("||u||")
     axs1[0].set_title(f"Final ||u|| = {state_norm[-1]:.2f}")
+    axs1[0].legend()
     axs1[0].grid()
 
     action_norm = jnp.linalg.norm(action_arr, axis=1)
@@ -331,10 +333,12 @@ def plot_episode(
     axs1[1].set_ylabel("||a||")
     axs1[1].grid()
 
-    axs1[2].plot(reward_arr)
+    axs1[2].plot(reward_env_arr, color=true_color, label="True")
+    axs1[2].plot(reward_model_arr, "--", color=model_color, label="Model")
     axs1[2].set_ylabel("r(u,a)")
-    axs1[2].grid()
     axs1[2].set_xlabel("t")
+    axs1[2].grid()
+    axs1[2].legend()
 
     # plot the tracked Fourier modes and measurements
     for j in range(3):
@@ -376,7 +380,7 @@ def plot_episode(
 
     # plot the actuation
     for j in range(3):
-        axs2[j, 2].plot(action_arr[:, j], color=true_color)
+        axs2[j, 2].plot(action_arr[:, j])
         axs2[j, 2].set_ylabel(f"a(x={x_act[j]:.2f})")
         if j < 2:
             axs2[j, 2].set_xticklabels([])

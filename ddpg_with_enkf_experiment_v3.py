@@ -90,7 +90,8 @@ def plot_KS_episode(
     unfilled_obs_arr,
     state_ens_arr,
     action_arr,
-    reward_arr,
+    reward_env_arr,
+    reward_model_arr,
     wait_steps,
     observation_starts,
 ):
@@ -146,7 +147,8 @@ def plot_KS_episode(
         obs_ens_arr,
         obs_mean_arr,
         action_arr,
-        reward_arr,
+        reward_env_arr,
+        reward_model_arr,
     )
     return fig
 
@@ -418,9 +420,7 @@ def run_experiment(
     )
     get_model_reward = jax.jit(get_model_reward)
 
-    def until_first_observation(
-        true_state, true_obs, state_ens, observation_starts, use_reward="env"
-    ):
+    def until_first_observation(true_state, true_obs, state_ens, observation_starts):
         def body_fun(carry, _):
             true_state, true_obs, state_ens = carry
             # advance true environment
@@ -433,18 +433,13 @@ def run_experiment(
             state = ensemble_to_state(state_ens)
             reward_model = get_model_reward(next_state=state, action=action)
 
-            # choose which reward
-            if use_reward == "env":
-                reward = reward_env
-            elif use_reward == "model":
-                reward = reward_model
-
             return (true_state, true_obs, state_ens), (
                 true_state,
                 true_obs,
                 state_ens,
                 action,
-                reward,
+                reward_env,
+                reward_model,
             )
 
         (true_state, true_obs, state_ens), (
@@ -452,7 +447,8 @@ def run_experiment(
             true_obs_arr,
             state_ens_arr,
             action_arr,
-            reward_arr,
+            reward_env_arr,
+            reward_model_arr,
         ) = jax.lax.scan(
             body_fun, (true_state, true_obs, state_ens), jnp.arange(observation_starts)
         )
@@ -464,7 +460,8 @@ def run_experiment(
             true_obs_arr,
             state_ens_arr,
             action_arr,
-            reward_arr,
+            reward_env_arr,
+            reward_model_arr,
         )
 
     def act_observe_and_forecast(
@@ -475,7 +472,6 @@ def run_experiment(
         wait_steps,
         episode_steps,
         key_obs,
-        use_reward="env",
     ):
         def forecast_fun(carry, _):
             true_state, true_obs, state_ens = carry
@@ -494,18 +490,13 @@ def run_experiment(
             state = ensemble_to_state(state_ens)
             reward_model = get_model_reward(next_state=state, action=action)
 
-            # choose which reward
-            if use_reward == "env":
-                reward = reward_env
-            elif use_reward == "model":
-                reward = reward_model
-
             return (true_state, true_obs, state_ens), (
                 true_state,
                 true_obs,
                 state_ens,
                 action,
-                reward,
+                reward_env,
+                reward_model,
             )
 
         def body_fun(carry, _):
@@ -528,7 +519,8 @@ def run_experiment(
                 true_obs_arr,
                 state_ens_arr,
                 action_arr,
-                reward_arr,
+                reward_env_arr,
+                reward_model_arr,
             ) = jax.lax.scan(
                 forecast_fun, (true_state, true_obs, state_ens), jnp.arange(wait_steps)
             )
@@ -549,6 +541,8 @@ def run_experiment(
             state_ens_arr,
             action_arr,
             reward_arr,
+            reward_env_arr,
+            reward_model_arr,
         ) = jax.lax.scan(
             body_fun, (true_state, true_obs, state_ens, key_obs), jnp.arange(n_loops)
         )
@@ -562,7 +556,8 @@ def run_experiment(
             obs_arr,
             state_ens_arr,
             action_arr,
-            reward_arr,
+            reward_env_arr,
+            reward_model_arr,
         )
 
     def random_observe_and_forecast(
@@ -609,7 +604,7 @@ def run_experiment(
                 next_state_ens,
                 key_action,
                 replay_buffer,
-            ), (true_state, true_obs, state_ens, action, reward)
+            ), (true_state, true_obs, state_ens, action, reward_env, reward_model)
 
         def body_fun(carry, _):
             # observe
@@ -631,7 +626,8 @@ def run_experiment(
                 true_obs_arr,
                 state_ens_arr,
                 action_arr,
-                reward_arr,
+                reward_env_arr,
+                reward_model_arr,
             ) = jax.lax.scan(
                 forecast_fun,
                 (true_state, true_obs, state_ens, key_action, replay_buffer),
@@ -650,7 +646,8 @@ def run_experiment(
                 obs,
                 state_ens_arr,
                 action_arr,
-                reward_arr,
+                reward_env_arr,
+                reward_model_arr,
             )
 
         n_loops = episode_steps // wait_steps
@@ -660,7 +657,8 @@ def run_experiment(
             obs_arr,
             state_ens_arr,
             action_arr,
-            reward_arr,
+            reward_env_arr,
+            reward_model_arr,
         ) = jax.lax.scan(
             body_fun,
             (true_state, true_obs, state_ens, key_obs, key_action, replay_buffer),
@@ -677,7 +675,8 @@ def run_experiment(
             obs_arr,
             state_ens_arr,
             action_arr,
-            reward_arr,
+            reward_env_arr,
+            reward_model_arr,
             replay_buffer,
         )
 
@@ -772,7 +771,16 @@ def run_experiment(
                 replay_buffer,
                 actor_state,
                 critic_state,
-            ), (true_state, true_obs, state_ens, action, reward, q_loss, policy_loss)
+            ), (
+                true_state,
+                true_obs,
+                state_ens,
+                action,
+                reward_env,
+                reward_model,
+                q_loss,
+                policy_loss,
+            )
 
         def body_fun(carry, _):
             # observe
@@ -811,7 +819,8 @@ def run_experiment(
                 true_obs_arr,
                 state_ens_arr,
                 action_arr,
-                reward_arr,
+                reward_env_arr,
+                reward_model_arr,
                 q_loss_arr,
                 policy_loss_arr,
             ) = jax.lax.scan(
@@ -842,7 +851,8 @@ def run_experiment(
                 obs,
                 state_ens_arr,
                 action_arr,
-                reward_arr,
+                reward_env_arr,
+                reward_model_arr,
                 q_loss_arr,
                 policy_loss_arr,
             )
@@ -863,7 +873,8 @@ def run_experiment(
             obs_arr,
             state_ens_arr,
             action_arr,
-            reward_arr,
+            reward_env_arr,
+            reward_model_arr,
             q_loss_arr,
             policy_loss_arr,
         ) = jax.lax.scan(
@@ -891,7 +902,8 @@ def run_experiment(
             obs_arr,
             state_ens_arr,
             action_arr,
-            reward_arr,
+            reward_env_arr,
+            reward_model_arr,
             q_loss_arr,
             policy_loss_arr,
             replay_buffer,
@@ -902,7 +914,6 @@ def run_experiment(
     until_first_observation = partial(
         until_first_observation,
         observation_starts=config.enKF.observation_starts,
-        use_reward=config.enKF.use_reward,
     )
     until_first_observation = jax.jit(until_first_observation)
 
@@ -910,7 +921,6 @@ def run_experiment(
         act_observe_and_forecast,
         wait_steps=config.enKF.wait_steps,
         episode_steps=config.episode_steps - config.enKF.observation_starts,
-        use_reward=config.enKF.use_reward,
     )
     act_observe_and_forecast = jax.jit(act_observe_and_forecast)
 
@@ -952,7 +962,8 @@ def run_experiment(
             true_obs_arr0,
             state_ens_arr0,
             action_arr0,
-            reward_arr0,
+            reward_env_arr0,
+            reward_model_arr0,
         ) = until_first_observation(
             true_state=init_true_state, true_obs=init_true_obs, state_ens=init_state_ens
         )
@@ -966,7 +977,8 @@ def run_experiment(
             obs_arr,
             state_ens_arr,
             action_arr,
-            reward_arr,
+            reward_env_arr,
+            reward_model_arr,
         ) = act_observe_and_forecast(
             true_state=true_state,
             true_obs=true_obs,
@@ -998,9 +1010,13 @@ def run_experiment(
             action_arr,
             (action_arr.shape[0] * action_arr.shape[1], action_arr.shape[2]),
         )
-        reward_arr = jnp.reshape(
-            reward_arr,
-            (reward_arr.shape[0] * reward_arr.shape[1],),
+        reward_env_arr = jnp.reshape(
+            reward_env_arr,
+            (reward_env_arr.shape[0] * reward_env_arr.shape[1],),
+        )
+        reward_model_arr = jnp.reshape(
+            reward_model_arr,
+            (reward_model_arr.shape[0] * reward_model_arr.shape[1],),
         )
         stack = lambda a, b, c: jnp.vstack((jnp.expand_dims(a, axis=0), b, c))
         hstack = lambda a, b, c: jnp.hstack((jnp.expand_dims(a, axis=0), b, c))
@@ -1011,7 +1027,8 @@ def run_experiment(
             obs_arr,
             stack(init_state_ens, state_ens_arr0, state_ens_arr),
             stack(null_action, action_arr0, action_arr),
-            hstack(init_reward, reward_arr0, reward_arr),
+            hstack(init_reward, reward_env_arr0, reward_env_arr),
+            hstack(init_reward, reward_model_arr0, reward_model_arr),
             key_env,
             key_obs,
         )
@@ -1039,7 +1056,8 @@ def run_experiment(
             true_obs_arr0,
             state_ens_arr0,
             action_arr0,
-            reward_arr0,
+            reward_env_arr0,
+            reward_model_arr0,
         ) = until_first_observation(
             true_state=init_true_state, true_obs=init_true_obs, state_ens=init_state_ens
         )
@@ -1054,7 +1072,8 @@ def run_experiment(
             obs_arr,
             state_ens_arr,
             action_arr,
-            reward_arr,
+            reward_env_arr,
+            reward_model_arr,
             replay_buffer,
         ) = random_observe_and_forecast(
             true_state=true_state,
@@ -1088,11 +1107,15 @@ def run_experiment(
             action_arr,
             (action_arr.shape[0] * action_arr.shape[1], action_arr.shape[2]),
         )
-        reward_arr = jnp.reshape(
-            reward_arr,
-            (reward_arr.shape[0] * reward_arr.shape[1],),
+        reward_env_arr = jnp.reshape(
+            reward_env_arr,
+            (reward_env_arr.shape[0] * reward_env_arr.shape[1],),
         )
 
+        reward_model_arr = jnp.reshape(
+            reward_model_arr,
+            (reward_model_arr.shape[0] * reward_model_arr.shape[1],),
+        )
         stack = lambda a, b, c: jnp.vstack((jnp.expand_dims(a, axis=0), b, c))
         hstack = lambda a, b, c: jnp.hstack((jnp.expand_dims(a, axis=0), b, c))
 
@@ -1102,7 +1125,8 @@ def run_experiment(
             obs_arr,
             stack(init_state_ens, state_ens_arr0, state_ens_arr),
             stack(null_action, action_arr0, action_arr),
-            hstack(init_reward, reward_arr0, reward_arr),
+            hstack(init_reward, reward_env_arr0, reward_env_arr),
+            hstack(init_reward, reward_model_arr0, reward_model_arr),
             replay_buffer,
             key_env,
             key_obs,
@@ -1134,7 +1158,8 @@ def run_experiment(
             true_obs_arr0,
             state_ens_arr0,
             action_arr0,
-            reward_arr0,
+            reward_env_arr0,
+            reward_model_arr0,
         ) = until_first_observation(
             true_state=init_true_state, true_obs=init_true_obs, state_ens=init_state_ens
         )
@@ -1149,7 +1174,8 @@ def run_experiment(
             obs_arr,
             state_ens_arr,
             action_arr,
-            reward_arr,
+            reward_env_arr,
+            reward_model_arr,
             q_loss_arr,
             policy_loss_arr,
             replay_buffer,
@@ -1191,11 +1217,14 @@ def run_experiment(
             action_arr,
             (action_arr.shape[0] * action_arr.shape[1], action_arr.shape[2]),
         )
-        reward_arr = jnp.reshape(
-            reward_arr,
-            (reward_arr.shape[0] * reward_arr.shape[1],),
+        reward_env_arr = jnp.reshape(
+            reward_env_arr,
+            (reward_env_arr.shape[0] * reward_env_arr.shape[1],),
         )
-
+        reward_model_arr = jnp.reshape(
+            reward_model_arr,
+            (reward_model_arr.shape[0] * reward_model_arr.shape[1],),
+        )
         q_loss_arr = jnp.reshape(
             q_loss_arr,
             (q_loss_arr.shape[0] * q_loss_arr.shape[1],),
@@ -1215,7 +1244,8 @@ def run_experiment(
             obs_arr,
             stack(init_state_ens, state_ens_arr0, state_ens_arr),
             stack(null_action, action_arr0, action_arr),
-            hstack(init_reward, reward_arr0, reward_arr),
+            hstack(init_reward, reward_env_arr0, reward_env_arr),
+            hstack(init_reward, reward_model_arr0, reward_model_arr),
             q_loss_arr,
             policy_loss_arr,
             replay_buffer,
@@ -1236,19 +1266,26 @@ def run_experiment(
             obs_arr,
             state_ens_arr,
             action_arr,
-            reward_arr,
+            reward_env_arr,
+            reward_model_arr,
             replay_buffer,
             key_env,
             key_obs,
             key_action,
         ) = random_episode(key_env, key_obs, key_action, replay_buffer)
-        random_return = jnp.sum(reward_arr)
-        random_ave_reward = jnp.mean(reward_arr)
-        random_last_reward = reward_arr[-1]
+        random_return_env = jnp.sum(reward_env_arr[config.enKF.observation_starts :])
+        random_last_reward_env = reward_env_arr[-1]
+
+        random_return_model = jnp.sum(
+            reward_model_arr[config.enKF.observation_starts :]
+        )
+        random_last_reward_model = reward_model_arr[-1]
+
         print(
-            f"Random input, Episode={i+1}/{random_episodes}, Return={random_return},  Average Reward={random_ave_reward}, Last Reward ={random_last_reward}",
+            f"Random input, Episode={i+1}/{random_episodes}, (ENV) Return = {random_return_env}, (MODEL) Return = {random_return_model},(ENV) Last Reward ={random_last_reward_env}, (MODEL) Last Reward ={random_last_reward_model}",
             flush=True,
         )
+
         if i == 0 or (i + 1) % n_plot == 0:
             if FLAGS.make_plots == True:
                 fig = plot_KS_episode(
@@ -1259,7 +1296,8 @@ def run_experiment(
                     obs_arr,
                     state_ens_arr,
                     action_arr,
-                    reward_arr,
+                    reward_env_arr,
+                    reward_model_arr,
                     config.enKF.wait_steps,
                     config.enKF.observation_starts,
                 )
@@ -1273,7 +1311,8 @@ def run_experiment(
                     "obs": obs_arr,
                     "state_ens": state_ens_arr,
                     "action": action_arr,
-                    "reward": reward_arr,
+                    "reward_env": reward_env_arr,
+                    "reward_model": reward_model_arr,
                 }
                 fp.write_h5(
                     FLAGS.experiment_path / "episode_data" / f"random_episode_{i+1}.h5",
@@ -1296,7 +1335,8 @@ def run_experiment(
             obs_arr,
             state_ens_arr,
             action_arr,
-            reward_arr,
+            reward_env_arr,
+            reward_model_arr,
             q_loss_arr,
             policy_loss_arr,
             replay_buffer,
@@ -1308,11 +1348,20 @@ def run_experiment(
         ) = learn_episode(
             key_env, key_obs, key_action, replay_buffer, actor_state, critic_state
         )
-        train_return = jnp.sum(reward_arr)
-        train_ave_reward = jnp.mean(reward_arr)
-        train_last_reward = reward_arr[-1]
+        train_return_env = jnp.sum(reward_env_arr[config.enKF.observation_starts :])
+        train_ave_reward_env = jnp.mean(
+            reward_env_arr[config.enKF.observation_starts :]
+        )
+        train_last_reward_env = reward_env_arr[-1]
+
+        train_return_model = jnp.sum(reward_model_arr[config.enKF.observation_starts :])
+        train_ave_reward_model = jnp.mean(
+            reward_model_arr[config.enKF.observation_starts :]
+        )
+        train_last_reward_model = reward_model_arr[-1]
+
         print(
-            f"Training, Episode={i+1}/{learn_episodes}, Return={train_return},  Average Reward={train_ave_reward}, Last Reward ={train_last_reward}",
+            f"Training, Episode={i+1}/{learn_episodes}, (ENV) Return = {train_return_env}, (MODEL) Return = {train_return_model}, (ENV) Last Reward ={train_last_reward_env}, (MODEL) Last Reward ={train_last_reward_model}",
             flush=True,
         )
 
@@ -1326,7 +1375,8 @@ def run_experiment(
                     obs_arr,
                     state_ens_arr,
                     action_arr,
-                    reward_arr,
+                    reward_env_arr,
+                    reward_model_arr,
                     config.enKF.wait_steps,
                     config.enKF.observation_starts,
                 )
@@ -1340,7 +1390,8 @@ def run_experiment(
                     "obs": obs_arr,
                     "state_ens": state_ens_arr,
                     "action": action_arr,
-                    "reward": reward_arr,
+                    "reward_env": reward_env_arr,
+                    "reward_model": reward_model_arr,
                 }
                 fp.write_h5(
                     FLAGS.experiment_path / "episode_data" / f"learn_episode_{i+1}.h5",
@@ -1357,13 +1408,23 @@ def run_experiment(
                     step=i * learn_steps + j,
                 )
 
-        metrics["train"]["episode_return"] = train_return
-        metrics["train"]["episode_average_reward"] = train_ave_reward
-        metrics["train"]["episode_last_reward"] = train_last_reward
+        metrics["train"]["episode_return_env"] = train_return_env
+        metrics["train"]["episode_average_reward_env"] = train_ave_reward_env
+        metrics["train"]["episode_last_reward_env"] = train_last_reward_env
+
+        metrics["train"]["episode_return_model"] = train_return_model
+        metrics["train"]["episode_average_reward_model"] = train_ave_reward_model
+        metrics["train"]["episode_last_reward_model"] = train_last_reward_model
+
         if (i + 1) % n_eval == 0:
-            eval_ave_return = 0
-            eval_ave_reward = 0
-            eval_ave_last_reward = 0
+            eval_ave_return_env = 0
+            eval_ave_reward_env = 0
+            eval_ave_last_reward_env = 0
+
+            eval_ave_return_model = 0
+            eval_ave_reward_model = 0
+            eval_ave_last_reward_model = 0
+
             for j in range(config.eval_episodes):
                 (
                     true_state_arr,
@@ -1371,13 +1432,28 @@ def run_experiment(
                     obs_arr,
                     state_ens_arr,
                     action_arr,
-                    reward_arr,
+                    reward_env_arr,
+                    reward_model_arr,
                     key_env,
                     key_obs,
                 ) = act_episode(key_env, key_obs, actor_state.params)
-                eval_ave_return += jnp.sum(reward_arr)
-                eval_ave_reward += jnp.mean(reward_arr)
-                eval_ave_last_reward += reward_arr[-1]
+
+                eval_ave_return_env += jnp.sum(
+                    reward_env_arr[config.enKF.observation_starts :]
+                )
+                eval_ave_reward_env += jnp.mean(
+                    reward_env_arr[config.enKF.observation_starts :]
+                )
+                eval_ave_last_reward_env += reward_env_arr[-1]
+
+                eval_ave_return_model += jnp.sum(
+                    reward_model_arr[config.enKF.observation_starts :]
+                )
+                eval_ave_reward_model += jnp.mean(
+                    reward_model_arr[config.enKF.observation_starts :]
+                )
+                eval_ave_last_reward_model += reward_model_arr[-1]
+
                 if (i + 1) % n_plot == 0 and j == 0:
                     if FLAGS.make_plots == True:
                         fig = plot_KS_episode(
@@ -1388,7 +1464,8 @@ def run_experiment(
                             obs_arr,
                             state_ens_arr,
                             action_arr,
-                            reward_arr,
+                            reward_env_arr,
+                            reward_model_arr,
                             config.enKF.wait_steps,
                             config.enKF.observation_starts,
                         )
@@ -1402,7 +1479,8 @@ def run_experiment(
                             "obs": obs_arr,
                             "state_ens": state_ens_arr,
                             "action": action_arr,
-                            "reward": reward_arr,
+                            "reward_env": reward_env_arr,
+                            "reward_model": reward_model_arr,
                         }
                         fp.write_h5(
                             FLAGS.experiment_path
@@ -1410,15 +1488,23 @@ def run_experiment(
                             / f"eval_episode_{i+1}.h5",
                             episode_dict,
                         )
-            eval_ave_return = eval_ave_return / config.eval_episodes
-            eval_ave_reward = eval_ave_reward / config.eval_episodes
-            eval_ave_last_reward = eval_ave_last_reward / config.eval_episodes
+            eval_ave_return_env = eval_ave_return_env / config.eval_episodes
+            eval_ave_reward_env = eval_ave_reward_env / config.eval_episodes
+            eval_ave_last_reward_env = eval_ave_last_reward_env / config.eval_episodes
+
+            eval_ave_return_model = eval_ave_return_model / config.eval_episodes
+            eval_ave_reward_model = eval_ave_reward_model / config.eval_episodes
+            eval_ave_last_reward_model = (
+                eval_ave_last_reward_model / config.eval_episodes
+            )
+
             print(
-                f"\n Evaluation, Episode={i+1}/{learn_episodes}, Average Return={eval_ave_return}, Average Reward={eval_ave_reward}, Average Last Reward ={eval_ave_last_reward} \n ",
+                f"\n Evaluation, Episode={i+1}/{learn_episodes}, (ENV) Return = {eval_ave_return_env}, (MODEL) Return = {eval_ave_return_model}, (ENV) Last Reward ={eval_ave_last_reward_env}, (MODEL) Last Reward ={eval_ave_last_reward_model}",
                 flush=True,
             )
+
             prev_max_eval_return = max_eval_return
-            max_eval_return = max(max_eval_return, eval_ave_return)
+            max_eval_return = max(max_eval_return, eval_ave_return_model)
             if max_eval_return > prev_max_eval_return:
                 best_checkpoint = {"actor": actor_state, "critic": critic_state}
                 save_args = orbax_utils.save_args_from_target(best_checkpoint)
@@ -1426,9 +1512,13 @@ def run_experiment(
                     best_model_dir, best_checkpoint, save_args=save_args, force=True
                 )
 
-            metrics["eval"]["average_return"] = eval_ave_return
-            metrics["eval"]["average_reward"] = eval_ave_reward
-            metrics["eval"]["average_last_reward"] = eval_ave_last_reward
+            metrics["eval"]["average_return_env"] = eval_ave_return_env
+            metrics["eval"]["average_reward_env"] = eval_ave_reward_env
+            metrics["eval"]["average_last_reward_env"] = eval_ave_last_reward_env
+
+            metrics["eval"]["average_return_model"] = eval_ave_return_model
+            metrics["eval"]["average_reward_model"] = eval_ave_reward_model
+            metrics["eval"]["average_last_reward_model"] = eval_ave_last_reward_model
 
         if (i + 1) == learn_episodes:
             (
@@ -1437,13 +1527,26 @@ def run_experiment(
                 obs_arr,
                 state_ens_arr,
                 action_arr,
-                reward_arr,
+                reward_env_arr,
+                reward_model_arr,
                 key_env,
                 key_obs,
             ) = act_episode(key_env, key_obs, actor_state.params)
-            final_eval_return = jnp.sum(reward_arr)
-            final_eval_ave_reward = jnp.mean(reward_arr)
-            final_eval_last_reward = reward_arr[-1]
+            final_eval_return_env = jnp.sum(
+                reward_env_arr[config.enKF.observation_starts :]
+            )
+            final_eval_ave_reward_env = jnp.mean(
+                reward_env_arr[config.enKF.observation_starts :]
+            )
+            final_eval_last_reward_env = reward_env_arr[-1]
+
+            final_eval_return_model = jnp.sum(
+                reward_model_arr[config.enKF.observation_starts :]
+            )
+            final_eval_ave_reward_model = jnp.mean(
+                reward_model_arr[config.enKF.observation_starts :]
+            )
+            final_eval_last_reward_model = reward_model_arr[-1]
             if FLAGS.make_plots == True:
                 fig = plot_KS_episode(
                     env,
@@ -1453,7 +1556,8 @@ def run_experiment(
                     obs_arr,
                     state_ens_arr,
                     action_arr,
-                    reward_arr,
+                    reward_env_arr,
+                    reward_model_arr,
                     config.enKF.wait_steps,
                     config.enKF.observation_starts,
                 )
@@ -1465,14 +1569,15 @@ def run_experiment(
                     "obs": obs_arr,
                     "state_ens": state_ens_arr,
                     "action": action_arr,
-                    "reward": reward_arr,
+                    "reward_env": reward_env_arr,
+                    "reward_model": reward_model_arr,
                 }
                 fp.write_h5(
                     FLAGS.experiment_path / "episode_data" / f"final_eval_episode.h5",
                     episode_dict,
                 )
             print(
-                f"\n Final evaluation, Episode={i+1}/{learn_episodes}, Return={final_eval_return}, Average Reward={final_eval_ave_reward}, Last Reward ={final_eval_last_reward} \n ",
+                f"\n Final evaluation, Episode={i+1}/{learn_episodes}, (ENV) Return = {final_eval_return_env}, (MODEL) Return {final_eval_return_model}, (ENV) Last Reward = {final_eval_last_reward_env}, (MODEL) Last Reward = {final_eval_last_reward_model}",
                 flush=True,
             )
 

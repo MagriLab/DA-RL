@@ -899,8 +899,8 @@ def run_experiment(config, env, agent, wandb_run=None, logs=None, checkpoint_dir
             key_obs,
             key_action,
         ) = random_episode(key_env, key_obs, key_action, replay_buffer)
-        random_return = jnp.sum(reward_arr)
-        random_ave_reward = jnp.mean(reward_arr)
+        random_return = jnp.sum(reward_arr[config.enKF.observation_starts :])
+        random_ave_reward = jnp.mean(reward_arr[config.enKF.observation_starts :])
         random_last_reward = reward_arr[-1]
         print(
             f"Random input, Episode={i+1}/{random_episodes}, Return={random_return},  Average Reward={random_ave_reward}, Last Reward ={random_last_reward}",
@@ -961,8 +961,8 @@ def run_experiment(config, env, agent, wandb_run=None, logs=None, checkpoint_dir
         ) = learn_episode(
             key_env, key_obs, key_action, replay_buffer, actor_state, critic_state
         )
-        train_return = jnp.sum(reward_arr)
-        train_ave_reward = jnp.mean(reward_arr)
+        train_return = jnp.sum(reward_arr[config.enKF.observation_starts :])
+        train_ave_reward = jnp.mean(reward_arr[config.enKF.observation_starts :])
         train_last_reward = reward_arr[-1]
         print(
             f"Training, Episode={i+1}/{learn_episodes}, Return={train_return},  Average Reward={train_ave_reward}, Last Reward ={train_last_reward}",
@@ -1024,8 +1024,10 @@ def run_experiment(config, env, agent, wandb_run=None, logs=None, checkpoint_dir
                     key_env,
                     key_obs,
                 ) = act_episode(key_env, key_obs, actor_state.params)
-                eval_ave_return += jnp.sum(reward_arr)
-                eval_ave_reward += jnp.mean(reward_arr)
+                eval_ave_return += jnp.sum(reward_arr[config.enKF.observation_starts :])
+                eval_ave_reward += jnp.mean(
+                    reward_arr[config.enKF.observation_starts :]
+                )
                 eval_ave_last_reward += reward_arr[-1]
                 if (i + 1) % n_plot == 0 and j == 0:
                     if FLAGS.make_plots == True:
@@ -1086,8 +1088,10 @@ def run_experiment(config, env, agent, wandb_run=None, logs=None, checkpoint_dir
                 key_env,
                 key_obs,
             ) = act_episode(key_env, key_obs, actor_state.params)
-            final_eval_return = jnp.sum(reward_arr)
-            final_eval_ave_reward = jnp.mean(reward_arr)
+            final_eval_return = jnp.sum(reward_arr[config.enKF.observation_starts :])
+            final_eval_ave_reward = jnp.mean(
+                reward_arr[config.enKF.observation_starts :]
+            )
             final_eval_last_reward = reward_arr[-1]
             if FLAGS.make_plots == True:
                 fig = plot_KS_episode(
