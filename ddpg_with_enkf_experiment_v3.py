@@ -305,15 +305,21 @@ def run_experiment(
         key_network, state_0, action_0
     )
 
+    # set up checkpointers
+    orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+    options = orbax.checkpoint.CheckpointManagerOptions(
+        save_interval_steps=config.total_steps // 5
+    )
+    checkpoint_manager = orbax.checkpoint.CheckpointManager(
+        checkpoint_dir, orbax_checkpointer, options=options
+    )
+
+    best_model_dir = checkpoint_dir / "best_model"
+    final_model_dir = checkpoint_dir / "final_model"
+    checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+
     # checkpoint the initial weights
-    if checkpoint_dir is not None:
-        orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
-        options = orbax.checkpoint.CheckpointManagerOptions(
-            save_interval_steps=config.total_steps // 5
-        )
-        checkpoint_manager = orbax.checkpoint.CheckpointManager(
-            checkpoint_dir, orbax_checkpointer, options
-        )
+    if FLAGS.save_checkpoints == True:
         checkpoint = {"actor": actor_state, "critic": critic_state}
         save_args = orbax_utils.save_args_from_target(checkpoint)
         checkpoint_manager.save(0, checkpoint, save_kwargs={"save_args": save_args})
@@ -405,19 +411,40 @@ def run_experiment(
     )
     model_apply_enKF = jax.jit(model_apply_enKF)
 
-    def until_first_observation(true_state, true_obs, state_ens, observation_starts):
+    get_model_reward = partial(
+        KSenv.get_reward,
+        target=env.target,
+        actuator_loss_weight=env.actuator_loss_weight,
+    )
+    get_model_reward = jax.jit(get_model_reward)
+
+    def until_first_observation(
+        true_state, true_obs, state_ens, observation_starts, use_reward="env"
+    ):
         def body_fun(carry, _):
             true_state, true_obs, state_ens = carry
             # advance true environment
             action = null_action
-            true_state, true_obs, _, _, _, _ = env_step(state=true_state, action=action)
+            true_state, true_obs, reward_env, _, _, _ = env_step(
+                state=true_state, action=action
+            )
             # advance model
             state_ens = model_forecast(state_ens=state_ens, action=action)
+            state = ensemble_to_state(state_ens)
+            reward_model = get_model_reward(next_state=state, action=action)
+
+            # choose which reward
+            if use_reward == "env":
+                reward = reward_env
+            elif use_reward == "model":
+                reward = reward_model
+
             return (true_state, true_obs, state_ens), (
                 true_state,
                 true_obs,
                 state_ens,
                 action,
+                reward,
             )
 
         (true_state, true_obs, state_ens), (
@@ -425,6 +452,7 @@ def run_experiment(
             true_obs_arr,
             state_ens_arr,
             action_arr,
+            reward_arr,
         ) = jax.lax.scan(
             body_fun, (true_state, true_obs, state_ens), jnp.arange(observation_starts)
         )
@@ -436,10 +464,18 @@ def run_experiment(
             true_obs_arr,
             state_ens_arr,
             action_arr,
+            reward_arr,
         )
 
     def act_observe_and_forecast(
-        true_state, true_obs, state_ens, params, wait_steps, episode_steps, key_obs
+        true_state,
+        true_obs,
+        state_ens,
+        params,
+        wait_steps,
+        episode_steps,
+        key_obs,
+        use_reward="env",
     ):
         def forecast_fun(carry, _):
             true_state, true_obs, state_ens = carry
@@ -449,12 +485,21 @@ def run_experiment(
             action = agent.actor.apply(params, state)
 
             # get the next observation and reward with this action
-            true_state, true_obs, reward, _, _, _ = env_step(
+            true_state, true_obs, reward_env, _, _, _ = env_step(
                 state=true_state, action=action
             )
 
             # forecast
             state_ens = model_forecast(state_ens=state_ens, action=action)
+            state = ensemble_to_state(state_ens)
+            reward_model = get_model_reward(next_state=state, action=action)
+
+            # choose which reward
+            if use_reward == "env":
+                reward = reward_env
+            elif use_reward == "model":
+                reward = reward_model
+
             return (true_state, true_obs, state_ens), (
                 true_state,
                 true_obs,
@@ -529,6 +574,7 @@ def run_experiment(
         key_obs,
         key_action,
         replay_buffer,
+        use_reward="env",
     ):
         def forecast_fun(carry, _):
             true_state, true_obs, state_ens, key_action, replay_buffer = carry
@@ -539,13 +585,20 @@ def run_experiment(
             action = env_sample_action(key=key_action)
 
             # get the next observation and reward with this action
-            next_true_state, next_true_obs, reward, terminated, _, _ = env_step(
+            next_true_state, next_true_obs, reward_env, terminated, _, _ = env_step(
                 state=true_state, action=action
             )
 
             # forecast
             next_state_ens = model_forecast(state_ens=state_ens, action=action)
             next_state = ensemble_to_state(next_state_ens)
+            reward_model = get_model_reward(next_state=next_state, action=action)
+
+            # choose which reward
+            if use_reward == "env":
+                reward = reward_env
+            elif use_reward == "model":
+                reward = reward_model
 
             replay_buffer = add_experience(
                 replay_buffer, state, action, reward, next_state, terminated
@@ -639,6 +692,7 @@ def run_experiment(
         replay_buffer,
         actor_state,
         critic_state,
+        use_reward="env",
     ):
         def forecast_fun(carry, _):
             (
@@ -665,13 +719,20 @@ def run_experiment(
             action = jnp.clip(action, a_min=env.action_low, a_max=env.action_high)
 
             # get the next observation and reward with this action
-            next_true_state, next_true_obs, reward, terminated, _, _ = env_step(
+            next_true_state, next_true_obs, reward_env, terminated, _, _ = env_step(
                 state=true_state, action=action
             )
 
             # forecast
             next_state_ens = model_forecast(state_ens=state_ens, action=action)
             next_state = ensemble_to_state(next_state_ens)
+            reward_model = get_model_reward(next_state=state, action=action)
+
+            # choose which reward
+            if use_reward == "env":
+                reward = reward_env
+            elif use_reward == "model":
+                reward = reward_model
 
             replay_buffer = add_experience(
                 replay_buffer, state, action, reward, next_state, terminated
@@ -839,7 +900,9 @@ def run_experiment(
         )
 
     until_first_observation = partial(
-        until_first_observation, observation_starts=config.enKF.observation_starts
+        until_first_observation,
+        observation_starts=config.enKF.observation_starts,
+        use_reward=config.enKF.use_reward,
     )
     until_first_observation = jax.jit(until_first_observation)
 
@@ -847,6 +910,7 @@ def run_experiment(
         act_observe_and_forecast,
         wait_steps=config.enKF.wait_steps,
         episode_steps=config.episode_steps - config.enKF.observation_starts,
+        use_reward=config.enKF.use_reward,
     )
     act_observe_and_forecast = jax.jit(act_observe_and_forecast)
 
@@ -854,6 +918,7 @@ def run_experiment(
         random_observe_and_forecast,
         wait_steps=config.enKF.wait_steps,
         episode_steps=config.episode_steps - config.enKF.observation_starts,
+        use_reward=config.enKF.use_reward,
     )
     random_observe_and_forecast = jax.jit(random_observe_and_forecast)
 
@@ -861,6 +926,7 @@ def run_experiment(
         learn_observe_and_forecast,
         wait_steps=config.enKF.wait_steps,
         episode_steps=config.episode_steps - config.enKF.observation_starts,
+        use_reward=config.enKF.use_reward,
     )
     learn_observe_and_forecast = jax.jit(learn_observe_and_forecast)
 
@@ -872,6 +938,7 @@ def run_experiment(
             u0=init_true_state_mean, key=key_init
         )
         init_true_obs = init_true_state[env.observation_inds]
+        init_reward = jnp.nan
 
         # initialize enKF
         init_state_ens = model_initialize_ensemble(u0=init_true_state_mean, key=key_ens)
@@ -885,6 +952,7 @@ def run_experiment(
             true_obs_arr0,
             state_ens_arr0,
             action_arr0,
+            reward_arr0,
         ) = until_first_observation(
             true_state=init_true_state, true_obs=init_true_obs, state_ens=init_state_ens
         )
@@ -935,6 +1003,7 @@ def run_experiment(
             (reward_arr.shape[0] * reward_arr.shape[1],),
         )
         stack = lambda a, b, c: jnp.vstack((jnp.expand_dims(a, axis=0), b, c))
+        hstack = lambda a, b, c: jnp.hstack((jnp.expand_dims(a, axis=0), b, c))
 
         return (
             stack(init_true_state, true_state_arr0, true_state_arr),
@@ -942,7 +1011,7 @@ def run_experiment(
             obs_arr,
             stack(init_state_ens, state_ens_arr0, state_ens_arr),
             stack(null_action, action_arr0, action_arr),
-            reward_arr,
+            hstack(init_reward, reward_arr0, reward_arr),
             key_env,
             key_obs,
         )
@@ -956,6 +1025,8 @@ def run_experiment(
         )
         init_true_obs = init_true_state[env.observation_inds]
 
+        init_reward = jnp.nan
+
         # initialize enKF
         init_state_ens = model_initialize_ensemble(u0=init_true_state_mean, key=key_ens)
 
@@ -968,6 +1039,7 @@ def run_experiment(
             true_obs_arr0,
             state_ens_arr0,
             action_arr0,
+            reward_arr0,
         ) = until_first_observation(
             true_state=init_true_state, true_obs=init_true_obs, state_ens=init_state_ens
         )
@@ -1022,6 +1094,7 @@ def run_experiment(
         )
 
         stack = lambda a, b, c: jnp.vstack((jnp.expand_dims(a, axis=0), b, c))
+        hstack = lambda a, b, c: jnp.hstack((jnp.expand_dims(a, axis=0), b, c))
 
         return (
             stack(init_true_state, true_state_arr0, true_state_arr),
@@ -1029,7 +1102,7 @@ def run_experiment(
             obs_arr,
             stack(init_state_ens, state_ens_arr0, state_ens_arr),
             stack(null_action, action_arr0, action_arr),
-            reward_arr,
+            hstack(init_reward, reward_arr0, reward_arr),
             replay_buffer,
             key_env,
             key_obs,
@@ -1047,6 +1120,8 @@ def run_experiment(
         )
         init_true_obs = init_true_state[env.observation_inds]
 
+        init_reward = jnp.nan
+
         # initialize enKF
         init_state_ens = model_initialize_ensemble(u0=init_true_state_mean, key=key_ens)
 
@@ -1059,6 +1134,7 @@ def run_experiment(
             true_obs_arr0,
             state_ens_arr0,
             action_arr0,
+            reward_arr0,
         ) = until_first_observation(
             true_state=init_true_state, true_obs=init_true_obs, state_ens=init_state_ens
         )
@@ -1131,6 +1207,7 @@ def run_experiment(
         )
 
         stack = lambda a, b, c: jnp.vstack((jnp.expand_dims(a, axis=0), b, c))
+        hstack = lambda a, b, c: jnp.hstack((jnp.expand_dims(a, axis=0), b, c))
 
         return (
             stack(init_true_state, true_state_arr0, true_state_arr),
@@ -1138,7 +1215,7 @@ def run_experiment(
             obs_arr,
             stack(init_state_ens, state_ens_arr0, state_ens_arr),
             stack(null_action, action_arr0, action_arr),
-            reward_arr,
+            hstack(init_reward, reward_arr0, reward_arr),
             q_loss_arr,
             policy_loss_arr,
             replay_buffer,
@@ -1211,6 +1288,7 @@ def run_experiment(
     n_eval = config.eval_freq // config.episode_steps
     learn_steps = config.episode_steps - config.enKF.observation_starts
     metrics = {"train": {}, "eval": {}}
+    max_eval_return = -jnp.inf
     for i in range(learn_episodes):
         (
             true_state_arr,
@@ -1339,6 +1417,15 @@ def run_experiment(
                 f"\n Evaluation, Episode={i+1}/{learn_episodes}, Average Return={eval_ave_return}, Average Reward={eval_ave_reward}, Average Last Reward ={eval_ave_last_reward} \n ",
                 flush=True,
             )
+            prev_max_eval_return = max_eval_return
+            max_eval_return = max(max_eval_return, eval_ave_return)
+            if max_eval_return > prev_max_eval_return:
+                best_checkpoint = {"actor": actor_state, "critic": critic_state}
+                save_args = orbax_utils.save_args_from_target(best_checkpoint)
+                checkpointer.save(
+                    best_model_dir, best_checkpoint, save_args=save_args, force=True
+                )
+
             metrics["eval"]["average_return"] = eval_ave_return
             metrics["eval"]["average_reward"] = eval_ave_reward
             metrics["eval"]["average_last_reward"] = eval_ave_last_reward
@@ -1357,45 +1444,50 @@ def run_experiment(
             final_eval_return = jnp.sum(reward_arr)
             final_eval_ave_reward = jnp.mean(reward_arr)
             final_eval_last_reward = reward_arr[-1]
-            fig = plot_KS_episode(
-                env,
-                model,
-                true_state_arr,
-                true_obs_arr,
-                obs_arr,
-                state_ens_arr,
-                action_arr,
-                reward_arr,
-                config.enKF.wait_steps,
-                config.enKF.observation_starts,
-            )
-            fig.savefig(FLAGS.experiment_path / "plots" / f"final_eval_episode.png")
+            if FLAGS.make_plots == True:
+                fig = plot_KS_episode(
+                    env,
+                    model,
+                    true_state_arr,
+                    true_obs_arr,
+                    obs_arr,
+                    state_ens_arr,
+                    action_arr,
+                    reward_arr,
+                    config.enKF.wait_steps,
+                    config.enKF.observation_starts,
+                )
+                fig.savefig(FLAGS.experiment_path / "plots" / f"final_eval_episode.png")
+            if FLAGS.save_episode_data == True:
+                episode_dict = {
+                    "true_state": true_state_arr,
+                    "true_obs": true_obs_arr,
+                    "obs": obs_arr,
+                    "state_ens": state_ens_arr,
+                    "action": action_arr,
+                    "reward": reward_arr,
+                }
+                fp.write_h5(
+                    FLAGS.experiment_path / "episode_data" / f"final_eval_episode.h5",
+                    episode_dict,
+                )
             print(
                 f"\n Final evaluation, Episode={i+1}/{learn_episodes}, Return={final_eval_return}, Average Reward={final_eval_ave_reward}, Last Reward ={final_eval_last_reward} \n ",
                 flush=True,
-            )
-            episode_dict = {
-                "true_state": true_state_arr,
-                "true_obs": true_obs_arr,
-                "obs": obs_arr,
-                "state_ens": state_ens_arr,
-                "action": action_arr,
-                "reward": reward_arr,
-            }
-            fp.write_h5(
-                FLAGS.experiment_path / "episode_data" / f"final_eval_episode.h5",
-                episode_dict,
             )
 
         if wandb_run is not None:
             log_metrics_wandb(wandb_run, metrics, step=(i + 1) * learn_steps - 1)
         # checkpoint the model
-        if checkpoint_dir is not None:
+        if FLAGS.save_checkpoints == True:
             checkpoint = {"actor": actor_state, "critic": critic_state}
             save_args = orbax_utils.save_args_from_target(checkpoint)
             checkpoint_manager.save(
                 (i + 1) * learn_steps, checkpoint, save_kwargs={"save_args": save_args}
             )
+    final_checkpoint = {"actor": actor_state, "critic": critic_state}
+    save_args = orbax_utils.save_args_from_target(final_checkpoint)
+    checkpointer.save(final_model_dir, final_checkpoint, save_args=save_args)
     return (
         actor_state,
         critic_state,
@@ -1439,6 +1531,7 @@ def main(_):
     fp.save_config(FLAGS.experiment_path, config)
 
     # initialize wandb logging
+    config.experiment = "ddpg_with_enkf"
     if FLAGS.log_wandb:
         wandb_run = wandb.init(config=config.to_dict(), **FLAGS.wandb_config)
     else:
@@ -1451,10 +1544,7 @@ def main(_):
         logs = None
 
     # create model directory if checkpoint saving
-    if FLAGS.save_checkpoints:
-        checkpoint_dir = FLAGS.experiment_path / "models"
-    else:
-        checkpoint_dir = None
+    checkpoint_dir = FLAGS.experiment_path / "models"
 
     # create environment
     if config.env_name == "KS":
@@ -1475,14 +1565,6 @@ def main(_):
 
     actor_state, critic_state = run_experiment(
         config, env, agent, model, wandb_run, logs, checkpoint_dir
-    )
-
-    # save the final model weights
-    orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
-    final_checkpoint = {"actor": actor_state, "critic": critic_state}
-    save_args = orbax_utils.save_args_from_target(final_checkpoint)
-    orbax_checkpointer.save(
-        FLAGS.experiment_path / "final_model", final_checkpoint, save_args=save_args
     )
 
     # finish logging

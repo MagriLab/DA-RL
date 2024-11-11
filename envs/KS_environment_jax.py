@@ -136,12 +136,18 @@ class KSenv:
         return jax.random.uniform(key, shape=shape, minval=low, maxval=high)
 
     @staticmethod
-    def reward_state(state, target):
+    def get_reward_state(state, target):
         return jnp.linalg.norm(state - target)
 
     @staticmethod
-    def reward_action(action):
+    def get_reward_action(action):
         return jnp.linalg.norm(action)
+
+    @staticmethod
+    def get_reward(next_state, target, action, actuator_loss_weight):
+        return -KSenv.get_reward_state(
+            next_state, target
+        ) - actuator_loss_weight * KSenv.get_reward_action(action)
 
     @staticmethod
     def step(
@@ -176,9 +182,7 @@ class KSenv:
             # Take a step using the KS solver
             next_state = KS.advance(state, action, B, lin, ik, dt)
             # Compute reward
-            reward = -KSenv.reward_state(
-                next_state, target
-            ) - actuator_loss_weight * KSenv.reward_action(action)
+            reward = KSenv.get_reward(next_state, target, action, actuator_loss_weight)
             return next_state, reward
 
         next_state, total_reward = lax.scan(single_step, state, jnp.arange(frame_skip))

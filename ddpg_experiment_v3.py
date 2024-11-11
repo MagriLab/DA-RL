@@ -164,15 +164,21 @@ def run_experiment(config, env, agent, wandb_run=None, logs=None, checkpoint_dir
         key_network, state_0, action_0
     )
 
+    # set up checkpointers
+    orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+    options = orbax.checkpoint.CheckpointManagerOptions(
+        save_interval_steps=config.total_steps // 5
+    )
+    checkpoint_manager = orbax.checkpoint.CheckpointManager(
+        checkpoint_dir, orbax_checkpointer, options=options
+    )
+
+    best_model_dir = checkpoint_dir / "best_model"
+    final_model_dir = checkpoint_dir / "final_model"
+    checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+
     # checkpoint the initial weights
-    if checkpoint_dir is not None:
-        orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
-        options = orbax.checkpoint.CheckpointManagerOptions(
-            save_interval_steps=config.total_steps // 5
-        )
-        checkpoint_manager = orbax.checkpoint.CheckpointManager(
-            checkpoint_dir, orbax_checkpointer, options
-        )
+    if FLAGS.save_checkpoints == True:
         checkpoint = {"actor": actor_state, "critic": critic_state}
         save_args = orbax_utils.save_args_from_target(checkpoint)
         checkpoint_manager.save(0, checkpoint, save_kwargs={"save_args": save_args})
@@ -239,17 +245,27 @@ def run_experiment(config, env, agent, wandb_run=None, logs=None, checkpoint_dir
             true_state, true_obs = carry
             # advance true environment
             action = null_action
-            true_state, true_obs, _, _, _, _ = env_step(state=true_state, action=action)
-            return (true_state, true_obs), (true_state, true_obs, action)
+            true_state, true_obs, reward, _, _, _ = env_step(
+                state=true_state, action=action
+            )
+            return (true_state, true_obs), (true_state, true_obs, action, reward)
 
         (true_state, true_obs), (
             true_state_arr,
             true_obs_arr,
             action_arr,
+            reward_arr,
         ) = jax.lax.scan(
             body_fun, (true_state, true_obs), jnp.arange(observation_starts)
         )
-        return (true_state, true_obs, true_state_arr, true_obs_arr, action_arr)
+        return (
+            true_state,
+            true_obs,
+            true_state_arr,
+            true_obs_arr,
+            action_arr,
+            reward_arr,
+        )
 
     def act_observe_and_forecast(
         true_state, true_obs, params, wait_steps, episode_steps, key_obs
@@ -625,6 +641,8 @@ def run_experiment(config, env, agent, wandb_run=None, logs=None, checkpoint_dir
         )
         init_true_obs = init_true_state[env.observation_inds]
 
+        init_reward = jnp.nan
+
         # forecast until first observation
         (
             true_state,
@@ -632,6 +650,7 @@ def run_experiment(config, env, agent, wandb_run=None, logs=None, checkpoint_dir
             true_state_arr0,
             true_obs_arr0,
             action_arr0,
+            reward_arr0,
         ) = until_first_observation(true_state=init_true_state, true_obs=init_true_obs)
         (
             true_state,
@@ -669,13 +688,14 @@ def run_experiment(config, env, agent, wandb_run=None, logs=None, checkpoint_dir
             (reward_arr.shape[0] * reward_arr.shape[1],),
         )
         stack = lambda a, b, c: jnp.vstack((jnp.expand_dims(a, axis=0), b, c))
+        hstack = lambda a, b, c: jnp.hstack((jnp.expand_dims(a, axis=0), b, c))
 
         return (
             stack(init_true_state, true_state_arr0, true_state_arr),
             stack(init_true_obs, true_obs_arr0, true_obs_arr),
             obs_arr,
             stack(null_action, action_arr0, action_arr),
-            reward_arr,
+            hstack(init_reward, reward_arr0, reward_arr),
             key_env,
             key_obs,
         )
@@ -689,6 +709,8 @@ def run_experiment(config, env, agent, wandb_run=None, logs=None, checkpoint_dir
         )
         init_true_obs = init_true_state[env.observation_inds]
 
+        init_reward = jnp.nan
+
         # forecast until first observation
         (
             true_state,
@@ -696,6 +718,7 @@ def run_experiment(config, env, agent, wandb_run=None, logs=None, checkpoint_dir
             true_state_arr0,
             true_obs_arr0,
             action_arr0,
+            reward_arr0,
         ) = until_first_observation(true_state=init_true_state, true_obs=init_true_obs)
         obs_cov = cov.get_max(std=config.enKF.std_obs, y=true_obs)
 
@@ -748,13 +771,14 @@ def run_experiment(config, env, agent, wandb_run=None, logs=None, checkpoint_dir
 
         stack = lambda a, b, c: jnp.vstack((jnp.expand_dims(a, axis=0), b, c))
         stack2 = lambda a, b: jnp.vstack((jnp.expand_dims(a, axis=0), b))
+        hstack = lambda a, b, c: jnp.hstack((jnp.expand_dims(a, axis=0), b, c))
 
         return (
             stack(init_true_state, true_state_arr0, true_state_arr),
             stack(init_true_obs, true_obs_arr0, true_obs_arr),
             stack2(first_obs, obs_arr),
             stack(null_action, action_arr0, action_arr),
-            reward_arr,
+            hstack(init_reward, reward_arr0, reward_arr),
             replay_buffer,
             key_env,
             key_obs,
@@ -772,6 +796,8 @@ def run_experiment(config, env, agent, wandb_run=None, logs=None, checkpoint_dir
         )
         init_true_obs = init_true_state[env.observation_inds]
 
+        init_reward = jnp.nan
+
         # forecast until first observation
         (
             true_state,
@@ -779,6 +805,7 @@ def run_experiment(config, env, agent, wandb_run=None, logs=None, checkpoint_dir
             true_state_arr0,
             true_obs_arr0,
             action_arr0,
+            reward_arr0,
         ) = until_first_observation(true_state=init_true_state, true_obs=init_true_obs)
 
         obs_cov = cov.get_max(std=config.enKF.std_obs, y=true_obs)
@@ -839,13 +866,14 @@ def run_experiment(config, env, agent, wandb_run=None, logs=None, checkpoint_dir
 
         stack = lambda a, b, c: jnp.vstack((jnp.expand_dims(a, axis=0), b, c))
         stack2 = lambda a, b: jnp.vstack((jnp.expand_dims(a, axis=0), b))
+        hstack = lambda a, b, c: jnp.hstack((jnp.expand_dims(a, axis=0), b, c))
 
         return (
             stack(init_true_state, true_state_arr0, true_state_arr),
             stack(init_true_obs, true_obs_arr0, true_obs_arr),
             stack2(first_obs, obs_arr),
             stack(null_action, action_arr0, action_arr),
-            reward_arr,
+            hstack(init_reward, reward_arr0, reward_arr),
             q_loss_arr,
             policy_loss_arr,
             replay_buffer,
@@ -914,6 +942,7 @@ def run_experiment(config, env, agent, wandb_run=None, logs=None, checkpoint_dir
     n_eval = config.eval_freq // config.episode_steps
     learn_steps = config.episode_steps - config.enKF.observation_starts
     metrics = {"train": {}, "eval": {}}
+    max_eval_return = -jnp.inf
     for i in range(learn_episodes):
         (
             true_state_arr,
@@ -1034,6 +1063,15 @@ def run_experiment(config, env, agent, wandb_run=None, logs=None, checkpoint_dir
                 f"\n Evaluation, Episode={i+1}/{learn_episodes}, Average Return={eval_ave_return}, Average Reward={eval_ave_reward}, Average Last Reward ={eval_ave_last_reward} \n ",
                 flush=True,
             )
+            prev_max_eval_return = max_eval_return
+            max_eval_return = max(max_eval_return, eval_ave_return)
+            if max_eval_return > prev_max_eval_return:
+                best_checkpoint = {"actor": actor_state, "critic": critic_state}
+                save_args = orbax_utils.save_args_from_target(best_checkpoint)
+                checkpointer.save(
+                    best_model_dir, best_checkpoint, save_args=save_args, force=True
+                )
+
             metrics["eval"]["average_return"] = eval_ave_return
             metrics["eval"]["average_reward"] = eval_ave_reward
             metrics["eval"]["average_last_reward"] = eval_ave_last_reward
@@ -1082,12 +1120,15 @@ def run_experiment(config, env, agent, wandb_run=None, logs=None, checkpoint_dir
         if wandb_run is not None:
             log_metrics_wandb(wandb_run, metrics, step=(i + 1) * learn_steps - 1)
         # checkpoint the model
-        if checkpoint_dir is not None:
+        if FLAGS.save_checkpoints == True:
             checkpoint = {"actor": actor_state, "critic": critic_state}
             save_args = orbax_utils.save_args_from_target(checkpoint)
             checkpoint_manager.save(
                 (i + 1) * learn_steps, checkpoint, save_kwargs={"save_args": save_args}
             )
+    final_checkpoint = {"actor": actor_state, "critic": critic_state}
+    save_args = orbax_utils.save_args_from_target(final_checkpoint)
+    checkpointer.save(final_model_dir, final_checkpoint, save_args=save_args)
     return (
         actor_state,
         critic_state,
@@ -1131,6 +1172,7 @@ def main(_):
     fp.save_config(FLAGS.experiment_path, config)
 
     # initialize wandb logging
+    config.experiment = "ddpg"
     if FLAGS.log_wandb:
         wandb_run = wandb.init(config=config.to_dict(), **FLAGS.wandb_config)
     else:
@@ -1143,10 +1185,7 @@ def main(_):
         logs = None
 
     # create model directory if checkpoint saving
-    if FLAGS.save_checkpoints:
-        checkpoint_dir = FLAGS.experiment_path / "models"
-    else:
-        checkpoint_dir = None
+    checkpoint_dir = FLAGS.experiment_path / "models"
 
     # create environment
     if config.env_name == "KS":
@@ -1158,14 +1197,6 @@ def main(_):
 
     actor_state, critic_state = run_experiment(
         config, env, agent, wandb_run, logs, checkpoint_dir
-    )
-
-    # save the final model weights
-    orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
-    final_checkpoint = {"actor": actor_state, "critic": critic_state}
-    save_args = orbax_utils.save_args_from_target(final_checkpoint)
-    orbax_checkpointer.save(
-        FLAGS.experiment_path / "final_model", final_checkpoint, save_args=save_args
     )
 
     # finish logging
