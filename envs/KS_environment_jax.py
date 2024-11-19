@@ -7,7 +7,7 @@ from jax import jit, lax
 from jax.scipy.optimize import minimize
 
 from envs.KS_solver_jax import KS  # Import the KS solver
-
+from functools import partial
 
 class KSenv:
     def __init__(
@@ -78,12 +78,13 @@ class KSenv:
         self.observation_locs = self.ks_solver.x[self.observation_inds]
 
         # Determine target solution
-        self.target = self.determine_target(target)
+        self.target = KSenv.determine_target(target, self.N, self.action_size, self.ks_solver.B, self.ks_solver.lin, self.ks_solver.ik, self.ks_solver.dt)
 
         # # Jit compile the step function
         # self.jit_step = jit(self._step)
 
-    def fixed_point(self, u):
+    @staticmethod
+    def fixed_point(u, action_size, B, lin, ik, dt):
         """
         Compute the fixed point for the given initial condition.
 
@@ -95,18 +96,19 @@ class KSenv:
         """
         u_new = KS.advance(
             u,
-            jnp.zeros(self.action_size),
-            self.ks_solver.B,
-            self.ks_solver.lin,
-            self.ks_solver.ik,
-            self.ks_solver.dt,
+            jnp.zeros(action_size),
+            B,
+            lin,
+            ik,
+            dt
         )
         return jnp.linalg.norm(u_new - u)
-
-    def determine_target(self, target):
-        x = ((2 * jnp.pi) / self.N) * jnp.arange(self.N)
+    
+    @staticmethod
+    def determine_target(target, N, action_size, B, lin, ik, dt):
+        x = ((2 * jnp.pi) / N) * jnp.arange(N)
         if target == "e0":
-            return jnp.zeros(self.N)
+            return jnp.zeros(N)
         elif target == "e1":
             u0 = -jnp.cos(x)
         elif target == "e2":
@@ -116,7 +118,13 @@ class KSenv:
         else:
             raise ValueError("Target not recognized.")
 
-        result = minimize(self.fixed_point(u0))
+        partial_fixed_point = partial(KSenv.fixed_point, 
+                                      action_size = action_size, 
+                                      B = B,
+                                      lin = lin, 
+                                      ik = ik, 
+                                      dt = dt)
+        result = minimize(partial_fixed_point(u0))
         return result.x
 
     @staticmethod
@@ -137,7 +145,7 @@ class KSenv:
 
     @staticmethod
     def get_reward_state(state, target):
-        return jnp.linalg.norm(state - target)
+        return jnp.sqrt(1/len(state)) * jnp.linalg.norm(state - target)
 
     @staticmethod
     def get_reward_action(action):

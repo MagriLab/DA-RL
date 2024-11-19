@@ -413,9 +413,16 @@ def run_experiment(
     )
     model_apply_enKF = jax.jit(model_apply_enKF)
 
+    model_target = KSenv.determine_target(target=config.env.target, 
+                                          N=model.N,
+                                          action_size=env.action_size,
+                                          B=model.B,
+                                          lin=model.lin,
+                                          ik=model.ik,
+                                          dt=model.dt)
     get_model_reward = partial(
         KSenv.get_reward,
-        target=env.target,
+        target=model_target,
         actuator_loss_weight=env.actuator_loss_weight,
     )
     get_model_reward = jax.jit(get_model_reward)
@@ -530,7 +537,8 @@ def run_experiment(
                 obs,
                 state_ens_arr,
                 action_arr,
-                reward_arr,
+                reward_env_arr,
+                reward_model_arr
             )
 
         n_loops = episode_steps // wait_steps
@@ -540,7 +548,6 @@ def run_experiment(
             obs_arr,
             state_ens_arr,
             action_arr,
-            reward_arr,
             reward_env_arr,
             reward_model_arr,
         ) = jax.lax.scan(
@@ -1273,11 +1280,11 @@ def run_experiment(
             key_obs,
             key_action,
         ) = random_episode(key_env, key_obs, key_action, replay_buffer)
-        random_return_env = jnp.sum(reward_env_arr[config.enKF.observation_starts :])
+        random_return_env = jnp.sum(reward_env_arr[config.enKF.observation_starts + 1:])
         random_last_reward_env = reward_env_arr[-1]
 
         random_return_model = jnp.sum(
-            reward_model_arr[config.enKF.observation_starts :]
+            reward_model_arr[config.enKF.observation_starts + 1:]
         )
         random_last_reward_model = reward_model_arr[-1]
 
@@ -1348,13 +1355,13 @@ def run_experiment(
         ) = learn_episode(
             key_env, key_obs, key_action, replay_buffer, actor_state, critic_state
         )
-        train_return_env = jnp.sum(reward_env_arr[config.enKF.observation_starts :])
+        train_return_env = jnp.sum(reward_env_arr[config.enKF.observation_starts + 1 :])
         train_ave_reward_env = jnp.mean(
             reward_env_arr[config.enKF.observation_starts :]
         )
         train_last_reward_env = reward_env_arr[-1]
 
-        train_return_model = jnp.sum(reward_model_arr[config.enKF.observation_starts :])
+        train_return_model = jnp.sum(reward_model_arr[config.enKF.observation_starts + 1 :])
         train_ave_reward_model = jnp.mean(
             reward_model_arr[config.enKF.observation_starts :]
         )
@@ -1439,18 +1446,18 @@ def run_experiment(
                 ) = act_episode(key_env, key_obs, actor_state.params)
 
                 eval_ave_return_env += jnp.sum(
-                    reward_env_arr[config.enKF.observation_starts :]
+                    reward_env_arr[config.enKF.observation_starts + 1 :]
                 )
                 eval_ave_reward_env += jnp.mean(
-                    reward_env_arr[config.enKF.observation_starts :]
+                    reward_env_arr[config.enKF.observation_starts + 1 :]
                 )
                 eval_ave_last_reward_env += reward_env_arr[-1]
 
                 eval_ave_return_model += jnp.sum(
-                    reward_model_arr[config.enKF.observation_starts :]
+                    reward_model_arr[config.enKF.observation_starts + 1 :]
                 )
                 eval_ave_reward_model += jnp.mean(
-                    reward_model_arr[config.enKF.observation_starts :]
+                    reward_model_arr[config.enKF.observation_starts + 1 :]
                 )
                 eval_ave_last_reward_model += reward_model_arr[-1]
 
@@ -1499,7 +1506,7 @@ def run_experiment(
             )
 
             print(
-                f"\n Evaluation, Episode={i+1}/{learn_episodes}, (ENV) Return = {eval_ave_return_env}, (MODEL) Return = {eval_ave_return_model}, (ENV) Last Reward ={eval_ave_last_reward_env}, (MODEL) Last Reward ={eval_ave_last_reward_model}",
+                f"\n Evaluation, Episode={i+1}/{learn_episodes}, (ENV) Return = {eval_ave_return_env}, (MODEL) Return = {eval_ave_return_model}, (ENV) Last Reward ={eval_ave_last_reward_env}, (MODEL) Last Reward ={eval_ave_last_reward_model}  \n ",
                 flush=True,
             )
 
@@ -1533,18 +1540,18 @@ def run_experiment(
                 key_obs,
             ) = act_episode(key_env, key_obs, actor_state.params)
             final_eval_return_env = jnp.sum(
-                reward_env_arr[config.enKF.observation_starts :]
+                reward_env_arr[config.enKF.observation_starts + 1 :]
             )
             final_eval_ave_reward_env = jnp.mean(
-                reward_env_arr[config.enKF.observation_starts :]
+                reward_env_arr[config.enKF.observation_starts + 1 :]
             )
             final_eval_last_reward_env = reward_env_arr[-1]
 
             final_eval_return_model = jnp.sum(
-                reward_model_arr[config.enKF.observation_starts :]
+                reward_model_arr[config.enKF.observation_starts + 1 :]
             )
             final_eval_ave_reward_model = jnp.mean(
-                reward_model_arr[config.enKF.observation_starts :]
+                reward_model_arr[config.enKF.observation_starts + 1 :]
             )
             final_eval_last_reward_model = reward_model_arr[-1]
             if FLAGS.make_plots == True:
