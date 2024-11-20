@@ -1607,7 +1607,9 @@ def run_experiment(
 
 
 def main(_):
-    config = FLAGS.config
+    config = FLAGS.config  # Access experiment config
+    wandb_config = FLAGS.wandb_config  # Access wandb config
+    env_config = FLAGS.env_config  # Access environment config
 
     # set up system
     if FLAGS.gpu_id:

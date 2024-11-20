@@ -1140,7 +1140,9 @@ def run_experiment(config, env, agent, wandb_run=None, logs=None, checkpoint_dir
 
 
 def main(_):
-    config = FLAGS.config
+    config = FLAGS.config  # Access experiment config
+    wandb_config = FLAGS.wandb_config  # Access wandb config
+    env_config = FLAGS.env_config  # Access environment config
 
     # set up system
     if FLAGS.gpu_id:
@@ -1171,14 +1173,14 @@ def main(_):
     print(f"Experiment will be saved to {FLAGS.experiment_path}", flush=True)
 
     # add environment config to the config
-    config.env = FLAGS.env_config
+    config.env = env_config
 
     fp.save_config(FLAGS.experiment_path, config)
 
     # initialize wandb logging
     config.experiment = "ddpg"
     if FLAGS.log_wandb:
-        wandb_run = wandb.init(config=config.to_dict(), **FLAGS.wandb_config)
+        wandb_run = wandb.init(config=config.to_dict(), **wandb_config)
     else:
         wandb_run = None
 
