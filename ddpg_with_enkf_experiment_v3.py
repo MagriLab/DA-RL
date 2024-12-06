@@ -283,10 +283,19 @@ def EnKF(m, Af, d, Cdd, M, key):
     return Aa
 
 
-def apply_enKF(m, k, Af, d, Cdd, M, key):
+def inflate_ensemble(A, rho):
+    A_m = jnp.mean(A, -1, keepdims=True)
+    return A_m + rho * (A - A_m)
+
+
+def apply_enKF(m, k, Af, d, Cdd, M, key, rho=1.0):
     Af_full = jnp.vstack((Af, jnp.conjugate(jnp.flip(Af[1:-1, :], axis=0))))
     Aa_full = EnKF(m, Af_full, d, Cdd, M, key)
     Aa = Aa_full[:k, :]
+
+    # inflate analysed state ensemble
+    # helps with the collapse of variance when using small ensemble
+    Aa = inflate_ensemble(Aa, rho)
     return Aa
 
 
@@ -410,16 +419,19 @@ def run_experiment(
         m=config.enKF.m,
         k=len(model.k),
         M=obs_mat,
+        rho=config.enKF.inflation_factor,
     )
     model_apply_enKF = jax.jit(model_apply_enKF)
 
-    model_target = KSenv.determine_target(target=config.env.target, 
-                                          N=model.N,
-                                          action_size=env.action_size,
-                                          B=model.B,
-                                          lin=model.lin,
-                                          ik=model.ik,
-                                          dt=model.dt)
+    model_target = KSenv.determine_target(
+        target=config.env.target,
+        N=model.N,
+        action_size=env.action_size,
+        B=model.B,
+        lin=model.lin,
+        ik=model.ik,
+        dt=model.dt,
+    )
     get_model_reward = partial(
         KSenv.get_reward,
         target=model_target,
@@ -538,7 +550,7 @@ def run_experiment(
                 state_ens_arr,
                 action_arr,
                 reward_env_arr,
-                reward_model_arr
+                reward_model_arr,
             )
 
         n_loops = episode_steps // wait_steps
@@ -1280,11 +1292,13 @@ def run_experiment(
             key_obs,
             key_action,
         ) = random_episode(key_env, key_obs, key_action, replay_buffer)
-        random_return_env = jnp.sum(reward_env_arr[config.enKF.observation_starts + 1:])
+        random_return_env = jnp.sum(
+            reward_env_arr[config.enKF.observation_starts + 1 :]
+        )
         random_last_reward_env = reward_env_arr[-1]
 
         random_return_model = jnp.sum(
-            reward_model_arr[config.enKF.observation_starts + 1:]
+            reward_model_arr[config.enKF.observation_starts + 1 :]
         )
         random_last_reward_model = reward_model_arr[-1]
 
@@ -1361,7 +1375,9 @@ def run_experiment(
         )
         train_last_reward_env = reward_env_arr[-1]
 
-        train_return_model = jnp.sum(reward_model_arr[config.enKF.observation_starts + 1 :])
+        train_return_model = jnp.sum(
+            reward_model_arr[config.enKF.observation_starts + 1 :]
+        )
         train_ave_reward_model = jnp.mean(
             reward_model_arr[config.enKF.observation_starts :]
         )

@@ -34,7 +34,8 @@ def plot_episode_wo_KF(
         width_ratios=[1, 0.55, 1],
     )
     axs1 = subfigs0[1].subplots(3, 1)
-    axs2 = subfigs[1].subplots(3, 3)
+    plot_dim = 4
+    axs2 = subfigs[1].subplots(plot_dim, 3)
 
     # plot the full state
     im = axs0[0, 0].imshow(
@@ -159,20 +160,20 @@ def plot_episode_wo_KF(
     axs1[2].set_xlabel("t")
 
     # plot the tracked Fourier modes
-    for j in range(3):
+    for j in range(plot_dim):
         axs2[j, 0].plot(
             mag_state_arr[:, j + 1],
             color=true_color,
             label=f"True N={2*(mag_state_arr.shape[1]-1)}",
         )
         axs2[j, 0].set_ylabel(f"F(u)[{j+1}]")
-        if j < 2:
+        if j < plot_dim - 1:
             axs2[j, 0].set_xticklabels([])
-    axs2[2, 0].set_xlabel("t")
+    axs2[plot_dim - 1, 0].set_xlabel("t")
     axs2[0, 0].legend(loc="upper center", bbox_to_anchor=(0.5, 1.3), ncols=2)
 
     # plot the observations
-    for j in range(3):
+    for j in range(plot_dim):
         axs2[j, 1].plot(
             obs_arr[:, j],
             marker="o",
@@ -183,18 +184,18 @@ def plot_episode_wo_KF(
         )
         axs2[j, 1].plot(true_obs_arr[:, j], color=true_color, label="True")
         axs2[j, 1].set_ylabel(f"u(x={x_obs[j]:.2f})")
-        if j < 2:
+        if j < plot_dim - 1:
             axs2[j, 1].set_xticklabels([])
-    axs2[2, 1].set_xlabel("t")
+    axs2[plot_dim - 1, 1].set_xlabel("t")
     axs2[0, 1].legend(loc="upper center", bbox_to_anchor=(0.5, 1.3), ncols=3)
 
     # plot the actuation
-    for j in range(3):
+    for j in range(plot_dim):
         axs2[j, 2].plot(action_arr[:, j])
         axs2[j, 2].set_ylabel(f"a(x={x_act[j]:.2f})")
-        if j < 2:
+        if j < plot_dim - 1:
             axs2[j, 2].set_xticklabels([])
-    axs2[2, 2].set_xlabel("t")
+    axs2[plot_dim - 1, 2].set_xlabel("t")
 
     return fig
 
@@ -234,7 +235,8 @@ def plot_episode(
         width_ratios=[1, 0.55, 1],
     )
     axs1 = subfigs0[1].subplots(3, 1)
-    axs2 = subfigs[1].subplots(3, 3)
+    plot_dim = 4
+    axs2 = subfigs[1].subplots(plot_dim, 3)
 
     # plot the full state and reward
     im = axs0[0, 0].imshow(
@@ -341,7 +343,7 @@ def plot_episode(
     axs1[2].legend()
 
     # plot the tracked Fourier modes and measurements
-    for j in range(3):
+    for j in range(plot_dim):
         axs2[j, 0].plot(mag_state_ens_arr[:, j + 1, :], ":", linewidth=0.5)
         axs2[j, 0].plot(
             mag_state_arr[:, j + 1],
@@ -355,12 +357,12 @@ def plot_episode(
             label=f"Model N={2*(mag_state_mean_arr.shape[1]-1)}",
         )
         axs2[j, 0].set_ylabel(f"F(u)[{j+1}]")
-        if j < 2:
+        if j < plot_dim - 1:
             axs2[j, 0].set_xticklabels([])
-    axs2[2, 0].set_xlabel("t")
+    axs2[plot_dim - 1, 0].set_xlabel("t")
     axs2[0, 0].legend(loc="upper center", bbox_to_anchor=(0.5, 1.3), ncols=2)
 
-    for j in range(3):
+    for j in range(plot_dim):
         axs2[j, 1].plot(obs_ens_arr[:, j, :], ":", linewidth=0.5)
         axs2[j, 1].plot(true_obs_arr[:, j], color=true_color, label="True")
         axs2[j, 1].plot(obs_mean_arr[:, j], "--", color=model_color, label="Model")
@@ -373,17 +375,17 @@ def plot_episode(
             label="Noisy",
         )
         axs2[j, 1].set_ylabel(f"u(x={x_obs[j]:.2f})")
-        if j < 2:
+        if j < plot_dim - 1:
             axs2[j, 1].set_xticklabels([])
-    axs2[2, 1].set_xlabel("t")
+    axs2[plot_dim - 1, 1].set_xlabel("t")
     axs2[0, 1].legend(loc="upper center", bbox_to_anchor=(0.5, 1.3), ncols=3)
 
     # plot the actuation
-    for j in range(3):
+    for j in range(plot_dim):
         axs2[j, 2].plot(action_arr[:, j])
         axs2[j, 2].set_ylabel(f"a(x={x_act[j]:.2f})")
-        if j < 2:
+        if j < plot_dim - 1:
             axs2[j, 2].set_xticklabels([])
-    axs2[2, 2].set_xlabel("t")
+    axs2[plot_dim - 1, 2].set_xlabel("t")
 
     return fig

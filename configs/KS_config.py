@@ -7,7 +7,7 @@ def get_config():
     config.N = 64
     config.nu = 0.043
     config.actuator_scale = 0.3
-    config.actuator_loss_weight = 1.0
+    config.actuator_loss_weight = 0.2
     config.burn_in = 1000
     config.actuator_locs = ((2 * np.pi) / 9) * np.arange(9)
     config.sensor_locs = ((2 * np.pi) / 6) * np.arange(6)

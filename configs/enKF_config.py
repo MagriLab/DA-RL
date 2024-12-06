@@ -10,7 +10,7 @@ def get_config():
 
     config.seed = 41
 
-    config.total_steps = 10000
+    config.total_steps = 100000
     config.episode_steps = 1000
     config.learning_starts = 5000
     config.eval_freq = 5000
@@ -43,4 +43,5 @@ def get_config():
     config.enKF.observation_starts = 100
     config.enKF.wait_steps = 10
     config.enKF.use_reward = "model"
+    config.enKF.inflation_factor = 1.01
     return config
