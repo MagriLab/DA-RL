@@ -39,9 +39,9 @@ def get_config():
     config.enKF.std_init = 0.2
     config.enKF.m = 50
     config.enKF.std_obs = 0.2
-    config.enKF.low_order_N = 64
+    config.enKF.low_order_N = 20
     config.enKF.observation_starts = 100
     config.enKF.wait_steps = 10
     config.enKF.use_reward = "model"
-    config.enKF.inflation_factor = 1.01
+    config.enKF.inflation_factor = 1.0
     return config
