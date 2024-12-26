@@ -347,17 +347,25 @@ class ESN:
         return 1 - (self.connectivity / (self.N_reservoir - 1))
 
     def generate_input_weights(self):
-        if self.input_weights_mode == "sparse_random":
-            return generate_input_weights.sparse_random(
-                self.W_in_shape, self.N_param_dim, self.W_in_seeds
-            )
-        elif self.input_weights_mode == "sparse_grouped":
-            return generate_input_weights.sparse_grouped(
-                self.W_in_shape, self.N_param_dim, self.W_in_seeds
-            )
-        elif self.input_weights_mode == "sparse_grouped_parameter":
-            return generate_input_weights.sparse_grouped_parameter(
+        if self.input_weights_mode == "random_sparse":
+            return generate_input_weights.random_sparse(
                 self.W_in_shape, self.W_in_seeds
+            )
+        elif self.input_weights_mode == "random_sparse_input_sparse_param":
+            return generate_input_weights.random_sparse_input_sparse_param(
+                self.W_in_shape, self.N_param_dim, self.W_in_seeds
+            )
+        elif self.input_weights_mode == "random_sparse_input_dense_param":
+            return generate_input_weights.random_sparse_input_dense_param(
+                self.W_in_shape, self.N_param_dim, self.W_in_seeds
+            )
+        elif self.input_weights_mode == "grouped_sparse":
+            return generate_input_weights.grouped_sparse(
+                self.W_in_shape, self.W_in_seeds
+            )
+        elif self.input_weights_mode == "grouped_sparse_input_dense_param":
+            return generate_input_weights.grouped_sparse_input_dense_param(
+                self.W_in_shape, self.N_param_dim, self.W_in_seeds
             )
         elif self.input_weights_mode == "dense":
             return generate_input_weights.dense(self.W_in_shape, self.W_in_seeds)
