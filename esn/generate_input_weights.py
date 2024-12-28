@@ -9,7 +9,7 @@ def random_sparse(W_in_shape, W_in_seeds):
 
     Args:
         W_in_shape: N_reservoir x (N_inputs + N_input_bias + N_param_dim)
-        seeds: a list of seeds for the random generators;
+        W_in_seeds: a list of seeds for the random generators;
             one for the column index, one for the uniform sampling
     Returns:
         W_in: sparse matrix containing the input weights
@@ -39,7 +39,7 @@ def random_sparse_input_sparse_param(W_in_shape, N_param_dim, W_in_seeds):
 
     Args:
         W_in_shape: N_reservoir x (N_inputs + N_input_bias + N_param_dim)
-        seeds: a list of seeds for the random generators;
+        W_in_seeds: a list of seeds for the random generators;
             one for the column index, one for the uniform sampling
     Returns:
         W_in: sparse matrix containing the input weights
@@ -77,7 +77,7 @@ def random_sparse_input_dense_param(W_in_shape, N_param_dim, W_in_seeds):
 
     Args:
         W_in_shape: N_reservoir x (N_inputs + N_input_bias + N_param_dim)
-        seeds: a list of seeds for the random generators;
+        W_in_seeds: a list of seeds for the random generators;
             one for the column index, one for the uniform sampling
     Returns:
         W_in: sparse matrix containing the input weights

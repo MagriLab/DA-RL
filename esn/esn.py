@@ -28,19 +28,20 @@ class ESN:
         verbose=True,
         r2_mode=False,
         input_only_mode=False,
-        input_weights_mode="sparse_grouped",
-        reservoir_weights_mode="erdos_renyi2",
+        input_weights_mode="random_sparse",
+        reservoir_weights_mode="erdos_renyi1",
     ):
         """Creates an Echo State Network with the given parameters
         Args:
             reservoir_size: number of neurons in the reservoir
             dimension: dimension of the state space of the input and output
                 they must have the same size in order for the closed-loop to work
-            parameter_dimension: dimension of the system's bifurcation parameters
+            parameter_dimension: dimension of the system's bifurcation parameters or external forcing
             reservoir_connectivity: connectivity of the reservoir weights,
                 how many connections does each neuron have (on average)
             input_normalization: normalization applied to the input before activation
                 tuple with (mean, norm) such that u is updated as (u-mean)/norm
+            parameter_normalization; normalization applied to the parameters
             input_scaling: scaling applied to the input weights matrix
             spectral_radius: spectral radius (maximum absolute eigenvalue)
                 of the reservoir weights matrix
@@ -49,6 +50,9 @@ class ESN:
             input_bias: bias that is augmented to the input vector
             input_seeds: seeds to generate input weights matrix
             reservoir_seeds: seeds to generate reservoir weights matrix
+            tikhonov: l2 regularization coefficient
+            r2_mode: Lu readout
+            input_only_mode: without recurrent connections
         Returns:
             ESN object
 

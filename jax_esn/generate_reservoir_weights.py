@@ -5,18 +5,18 @@ import jax.numpy as jnp
 # from jax.experimental import sparse
 
 
-def erdos_renyi1(W_shape, sparseness, W_seeds):
+def erdos_renyi1(W_shape, sparseness, W_seed):
     """
     Create the reservoir weights matrix according to Erdos-Renyi network.
 
     Args:
-        W_shape (tuple): Shape of the matrix (rows, columns)
-        sparseness (float): Sparseness parameter
-        W_seeds (list): A list of seeds for the random generators; one for the connections, one for uniform sampling of weights
+        W_shape: Shape of the matrix (rows, columns)
+        sparseness: Sparseness parameter
+        W_seed: Seed for the random generators
     Returns:
         W: sparse matrix containing reservoir weights
     """
-    rnd0, rnd1 = jax.random.split(jax.random.PRNGKey(W_seeds[0]), 2)
+    rnd0, rnd1 = jax.random.split(jax.random.PRNGKey(W_seed), 2)
     W = jnp.zeros(W_shape)
     # Generate random connections matrix
     W_connection = jax.random.uniform(rnd0, shape=W_shape, minval=0, maxval=1.0)
@@ -31,20 +31,20 @@ def erdos_renyi1(W_shape, sparseness, W_seeds):
     return W
 
 
-def erdos_renyi2(W_shape, sparseness, W_seeds):
+def erdos_renyi2(W_shape, sparseness, W_seed):
     """
     Create the reservoir weights matrix according to Erdos-Renyi network.
 
     Args:
         W_shape (tuple): Shape of the matrix (rows, columns)
         sparseness (float): Sparseness parameter
-        W_seeds (list): A list of seeds for the random generators; one for the connections, one for uniform sampling of weights
+        W_seed: Seed for the random generator
 
     Returns:
         W: sparse matrix containing reservoir weights
     """
     prob = 1 - sparseness
-    rnd0, rnd1 = jax.random.split(jax.random.PRNGKey(W_seeds[0]), 2)
+    rnd0, rnd1 = jax.random.split(jax.random.PRNGKey(W_seed), 2)
     i, j = jnp.indices(W_shape)
     # Generate random values
     b_values = jax.random.uniform(rnd0, shape=W_shape, minval=0.0, maxval=1.0)
