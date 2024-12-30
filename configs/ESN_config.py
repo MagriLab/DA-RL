@@ -7,6 +7,9 @@ def get_config():
     # model configuration
     config.model = ml_collections.ConfigDict()
 
+    config.model.which_state = "true_state"  # true_state, true_obs, obs
+    config.model.which_control = "action"  # action, forcing
+
     config.model.network_dt = 5e-2
     config.model.washout_time = 5
 

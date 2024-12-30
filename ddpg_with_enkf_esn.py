@@ -543,14 +543,14 @@ def generate_training_episode(config, env, episode_type="null_action"):
 
     null_action_observe = partial(
         null_action_observe,
-        wait_steps=config.enKF.wait_steps,
+        wait_steps=1,  # WE GENERATE TRAINING DATA BY SAMPLING AT EVERY TIME STEP
         episode_steps=config.episode_steps,
     )
     null_action_observe = jax.jit(null_action_observe)
 
     random_action_observe = partial(
         random_action_observe,
-        wait_steps=config.enKF.wait_steps,
+        wait_steps=1,  # WE GENERATE TRAINING DATA BY SAMPLING AT EVERY TIME STEP
         episode_steps=config.episode_steps,
     )
     random_action_observe = jax.jit(random_action_observe)
@@ -679,6 +679,7 @@ def train_ESN(config, env, key):
         "true_observation": [],
         "observation": [],
         "action": [],
+        "forcing": [],
     }
     # can include POD time coefficients
 
@@ -686,8 +687,9 @@ def train_ESN(config, env, key):
     RAW_DATA["true_observation"] = true_obs_arrs
     RAW_DATA["observation"] = obs_arrs
     RAW_DATA["action"] = action_arrs
-
-    which_state = "true_state"
+    RAW_DATA["forcing"] = jax.vmap(lambda x: (env.ks_solver.B @ x.T).T)(
+        RAW_DATA["action"]
+    )
 
     train_idxs = np.arange(esn_config.train_episodes)
     val_idxs = np.arange(
@@ -716,8 +718,8 @@ def train_ESN(config, env, key):
     }
 
     for i in idxs_list:
-        y = RAW_DATA[which_state][i]
-        a = RAW_DATA["action"][i][1:]
+        y = RAW_DATA[esn_config.model.which_state][i]
+        a = RAW_DATA[esn_config.model.which_control][i][1:]
 
         full_state = RAW_DATA["true_state"][i]
 
@@ -851,14 +853,15 @@ def train_ESN(config, env, key):
         episode_error = error_measure(DATA["y"][episode_idx], y_pred)
         print(f"Error test episode {episode_idx}: {episode_error:.4f}")
         # plot prediction on test set and save it in the folder
-    return ESN_dict, min_dict
+    return ESN_dict, dict(
+        (name, param) for (name, param) in zip(hyp_param_names, hyp_params)
+    )
 
 
 def run_experiment(
-    config, env, agent, model, wandb_run=None, logs=None, checkpoint_dir=None
+    config, env, agent, model, key, wandb_run=None, logs=None, checkpoint_dir=None
 ):
     # random seed for initialization
-    key = jax.random.PRNGKey(config.seed)
     key, key_network, key_buffer, key_env, key_obs, key_action = jax.random.split(
         key, 6
     )
@@ -2239,11 +2242,23 @@ def main(_):
     agent = DDPG(config, env)
     print("Starting experiment.", flush=True)
 
+    # generate keys for running experiments
+    key = jax.random.PRNGKey(config.seed)
+    key_ESN, key_experiment = jax.random.split(key)
+
     # validate and train an ESN
     print("Training Echo State Network.", flush=True)
+    ESN_dict, hyp_params_dict = train_ESN(config, env, key_ESN)
+    model = JESN(
+        input_seed=config.esn.seed + 1, reservoir_seed=config.esn.seed + 2, **ESN_dict
+    )
+
+    # DOESN'T TAKE INTO VECTOR HYPERPARAMETERS LIKE IN SET_ESN FUNCTION!!
+    for hyp_param_name, hyp_param in enumerate(hyp_params_dict):
+        setattr(model, hyp_param_name, hyp_param)
 
     actor_state, critic_state = run_experiment(
-        config, env, agent, model, wandb_run, logs, checkpoint_dir
+        config, env, agent, model, key_experiment, wandb_run, logs, checkpoint_dir
     )
 
     # finish logging
