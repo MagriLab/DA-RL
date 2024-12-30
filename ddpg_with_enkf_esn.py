@@ -23,11 +23,18 @@ import wandb
 from ddpg import DDPG
 from envs.KS_environment_jax import KSenv
 from envs.KS_solver_jax import KS
-import jax_esn.esn as jesn
 from replay_buffer_jax import add_experience, init_replay_buffer, sample_experiences
 from utils import visualizations as vis
 from utils import covariance_matrix as cov
 from utils.system import set_gpu
+from utils import preprocessing as pp
+
+import numpy as np
+from esn.esn import ESN
+from esn.validation import validate, set_ESN
+from esn.utils import errors, scalers
+import jax_esn.esn as jesn
+from jax_esn.esn import ESN as JESN
 
 # system config
 FLAGS = flags.FLAGS
@@ -628,6 +635,223 @@ def generate_training_episode(config, env, episode_type="null_action"):
         )
 
     return episode
+
+
+def train_ESN(config, env, key):
+    key, key_env, key_obs, key_action = jax.random.split(key, 4)
+    esn_config = config.ESN
+    episode = generate_training_episode(
+        config, env, episode_type=esn_config.episode_type
+    )
+
+    # Define batched random keys for parallel processing
+    key_env, subkey_env = jax.random.split(key_env)
+    key_obs, subkey_obs = jax.random.split(key_obs)
+    key_action, subkey_action = jax.random.split(key_action)
+
+    # Create batched keys for all episodes
+    total_episodes = (
+        esn_config.train_episodes + esn_config.val_episodes + esn_config.test_episodes
+    )
+    batch_keys_env = jax.random.split(subkey_env, total_episodes)
+    batch_keys_obs = jax.random.split(subkey_obs, total_episodes)
+    batch_keys_action = jax.random.split(subkey_action, total_episodes)
+
+    # Use vmap to process all episodes in parallel
+    batched_results = jax.vmap(episode)(
+        batch_keys_env, batch_keys_obs, batch_keys_action
+    )
+
+    print("Creating training dataset.", flush=True)
+    # Unpack results
+    (
+        true_state_arrs,
+        true_obs_arrs,
+        obs_arrs,
+        action_arrs,
+        _,  # ignore rewards
+        _,
+        _,
+        _,  # Keys can be ignored if not needed further
+    ) = batched_results
+    RAW_DATA = {
+        "true_state": [],
+        "true_observation": [],
+        "observation": [],
+        "action": [],
+    }
+    # can include POD time coefficients
+
+    RAW_DATA["true_state"] = true_state_arrs
+    RAW_DATA["true_observation"] = true_obs_arrs
+    RAW_DATA["observation"] = obs_arrs
+    RAW_DATA["action"] = action_arrs
+
+    which_state = "true_state"
+
+    train_idxs = np.arange(esn_config.train_episodes)
+    val_idxs = np.arange(
+        esn_config.train_episodes, esn_config.train_episodes + esn_config.val_episodes
+    )
+    test_idxs = np.arange(
+        esn_config.train_episodes + esn_config.val_episodes,
+        esn_config.train_episodes + esn_config.val_episodes + esn_config.test_episodes,
+    )
+    idxs_list = np.concatenate((train_idxs, val_idxs, test_idxs), axis=None)
+
+    total_time = env.dt * config.episode_steps
+    train_time = total_time - esn_config.model.washout_time
+    network_dt = esn_config.model.network_dt
+    t = env.dt * jnp.arange(config.episode_steps + 1)
+
+    loop_times = [train_time]
+    DATA = {
+        "u_washout": [],
+        "p_washout": [],
+        "u": [],
+        "p": [],
+        "y": [],
+        "full_state": [],
+        "t": [],
+    }
+
+    for i in idxs_list:
+        y = RAW_DATA[which_state][i]
+        a = RAW_DATA["action"][i][1:]
+
+        full_state = RAW_DATA["true_state"][i]
+
+        episode_data = pp.create_dataset(
+            full_state,
+            y,
+            t,
+            a,
+            network_dt,
+            transient_time=0,
+            washout_time=esn_config.model.washout_time,
+            loop_times=loop_times,
+        )
+        [
+            DATA[var].append(np.asarray(episode_data["loop_0"][var]))
+            for var in DATA.keys()
+        ]
+        # convert to numpy here because validation of ESN is in numpy
+
+    # dimension of the inputs
+    dim = DATA["u"][0].shape[1]
+    action_dim = DATA["p"][0].shape[1]
+
+    print("Dimension", dim)
+    print("Creating hyperparameter search range.", flush=True)
+
+    hyp_param_names = [name for name in esn_config.val.hyperparameters.keys()]
+
+    # scale for the hyperparameter range
+    hyp_param_scales = [
+        esn_config.val.hyperparameters[name].scale for name in hyp_param_names
+    ]
+
+    # range for hyperparameters
+    grid_range = [
+        [
+            esn_config.val.hyperparameters[name].min,
+            esn_config.val.hyperparameters[name].max,
+        ]
+        for name in hyp_param_names
+    ]
+
+    # scale the ranges
+    for i in range(len(grid_range)):
+        for j in range(2):
+            scaler = getattr(scalers, hyp_param_scales[i])
+            grid_range[i][j] = scaler(grid_range[i][j])
+
+    # create base ESN
+    ESN_dict = {
+        "dimension": dim,
+        "reservoir_size": esn_config.model.reservoir_size,
+        "parameter_dimension": action_dim,
+        "reservoir_connectivity": esn_config.model.connectivity,
+        "r2_mode": esn_config.model.r2_mode,
+        "input_weights_mode": esn_config.model.input_weights_mode,
+        "reservoir_weights_mode": esn_config.model.reservoir_weights_mode,
+        "tikhonov": esn_config.tikhonov,
+    }
+    if esn_config.model.normalize_input:
+        data_mean = np.mean(np.vstack(DATA["u"]), axis=0)
+        data_std = np.std(np.vstack(DATA["u"]), axis=0)
+        ESN_dict["input_normalization"] = [data_mean, data_std]
+        ESN_dict["output_bias"] = np.array(
+            [1.0]
+        )  # if subtracting the mean, need the output bias
+
+    N_washout = pp.get_steps(esn_config.model.washout_time, esn_config.model.network_dt)
+    N_val = pp.get_steps(esn_config.val.fold_time, esn_config.model.network_dt)
+    N_transient = 0
+    error_measure = getattr(errors, esn_config.val.error_measure)
+    print("Starting validation.", flush=True)
+    min_dict = validate(
+        grid_range,
+        hyp_param_names,
+        hyp_param_scales,
+        n_calls=esn_config.val.n_calls,
+        n_initial_points=esn_config.val.n_initial_points,
+        ESN_dict=ESN_dict,
+        U_washout_train=DATA["u_washout"],
+        U_train=DATA["u"],
+        U_val=DATA["u"],
+        Y_train=DATA["y"],
+        Y_val=DATA["y"],
+        P_washout_train=DATA["p_washout"],
+        P_train=DATA["p"],
+        P_val=DATA["p"],
+        n_folds=esn_config.val.n_folds,
+        n_realisations=esn_config.val.n_realisations,
+        N_washout_steps=N_washout,
+        N_val_steps=N_val,
+        N_transient_steps=N_transient,
+        train_idx_list=train_idxs,
+        val_idx_list=val_idxs,
+        random_seed=esn_config.val.seed,
+        error_measure=error_measure,
+        network_dt=esn_config.model.network_dt,
+    )
+
+    print("Testing on the test set.", flush=True)
+    hyp_params = []
+    for name in hyp_param_names:
+        hyp_params.extend(min_dict[name][0])
+    hyp_param_scales_ = ["uniform"] * len(hyp_param_names)
+    # after validation, hyperparameters are saved with uniform scaling
+
+    # fix the seeds
+    my_ESN = ESN(
+        input_seeds=[config.val.seed + 1, config.val.seed + 2, config.val.seed + 3],
+        reservoir_seeds=[config.val.seed + 4, config.val.seed + 5],
+        **ESN_dict,
+    )
+    set_ESN(my_ESN, hyp_param_names, hyp_param_scales_, hyp_params)
+
+    my_ESN.train(
+        DATA["u_washout"],
+        DATA["u"],
+        DATA["y"],
+        P_washout=DATA["p_washout"],
+        P_train=DATA["p"],
+        train_idx_list=train_idxs,
+    )
+    for episode_idx in test_idxs:
+        _, y_pred = my_ESN.closed_loop_with_washout(
+            U_washout=DATA["u_washout"][episode_idx],
+            P_washout=DATA["train"]["p_washout"][episode_idx],
+            P=DATA["train"]["p"][episode_idx],
+            N_t=len(DATA["u_washout"][episode_idx]),
+        )
+        y_pred = y_pred[1:]
+        episode_error = error_measure(DATA["y"][episode_idx], y_pred)
+        print(f"Error test episode {episode_idx}: {episode_error:.4f}")
+        # plot prediction on test set and save it in the folder
+    return ESN_dict, min_dict
 
 
 def run_experiment(
