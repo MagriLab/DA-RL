@@ -35,6 +35,7 @@ from esn.validation import validate, set_ESN
 from esn.utils import errors, scalers
 import jax_esn.esn as jesn
 from jax_esn.esn import ESN as JESN
+import matplotlib.pyplot as plt
 
 # system config
 FLAGS = flags.FLAGS
@@ -57,7 +58,7 @@ flags.DEFINE_bool(
 )
 flags.DEFINE_bool(
     "make_plots",
-    False,
+    True,
     "Use --make_plots to plot an episode and save it.",
 )
 _CONFIG = config_flags.DEFINE_config_file(
@@ -69,7 +70,9 @@ _WANDB = config_flags.DEFINE_config_file(
 _ENV = config_flags.DEFINE_config_file(
     "env_config", "configs/KS_config.py", "Contains configs for the environment."
 )
-
+_ESN = config_flags.DEFINE_config_file(
+    "esn_config", "configs/ESN_config.py", "Contains configs for the ESN."
+)
 # flags.mark_flags_as_required(['config'])
 
 
@@ -96,7 +99,8 @@ def plot_KS_episode(
     true_state_arr,
     true_obs_arr,
     unfilled_obs_arr,
-    state_ens_arr,
+    state_ens_arr,  # has shape (time_steps, state_dimension, ensemble_size)
+    before_readout,
     action_arr,
     reward_env_arr,
     reward_model_arr,
@@ -116,19 +120,38 @@ def plot_KS_episode(
         )
 
     # get full state from low order model
-    full_state_ens_arr = ...
+    single_readout_fn = (
+        lambda x: before_readout(x, model.output_bias) @ model.output_weights
+    )
+    time_readout_fn = jax.vmap(single_readout_fn, in_axes=0, out_axes=0)
+    ensemble_readout_fn = jax.vmap(time_readout_fn, in_axes=2, out_axes=2)
+
+    # Apply the function
+    full_state_ens_arr = ensemble_readout_fn(state_ens_arr)
 
     # get the mean
     full_state_mean_arr = jnp.mean(full_state_ens_arr, axis=-1)
 
     # get observations from low order model
-    obs_ens_arr = ...
+    obs_ens_arr = full_state_ens_arr[:, env.observation_inds, :]
 
     # get the mean
     obs_mean_arr = jnp.mean(obs_ens_arr, axis=-1)
 
+    # get fourier coefficients
+    true_state_arr_f = jnp.fft.rfft(true_state_arr, axis=1)
+
+    # get full state from low order model
+    state_ens_arr_f = jax.vmap(
+        lambda x: jnp.fft.rfft(x, axis=1), in_axes=-1, out_axes=-1
+    )(full_state_ens_arr)
+
+    mag_state_arr = 2 / env.N * jnp.abs(true_state_arr_f)
+    mag_state_ens_arr = 2 / model.N_dim * jnp.abs(state_ens_arr_f)
+    mag_state_mean_arr = jnp.mean(mag_state_ens_arr, axis=-1)
+
     # fill the observations
-    fig = vis.plot_esn_episode(
+    fig = vis.plot_episode(
         x,
         x_obs,
         x_act,
@@ -136,6 +159,9 @@ def plot_KS_episode(
         true_state_arr,
         full_state_ens_arr,
         full_state_mean_arr,
+        mag_state_arr,
+        mag_state_ens_arr,
+        mag_state_mean_arr,
         true_obs_arr,
         obs_arr,
         obs_ens_arr,
@@ -196,7 +222,8 @@ def initialize_ensemble_with_auto_washout(my_ESN, N_washout, u0, p0, std_init, m
     # Vectorize the washout process over the ensemble
     r0_ens = jax.vmap(single_washout)(u0_sampled)
 
-    return r0_ens
+    # transpose so we have column vectors for the reservoir state
+    return r0_ens.T
 
 
 def draw_initial_condition(u0, std_init, key):
@@ -209,7 +236,7 @@ def draw_initial_condition(u0, std_init, key):
         (1,),
         method="svd",
     )
-    return u0_sampled
+    return u0_sampled.squeeze()
 
 
 def get_observation_matrix(my_ESN, observation_indices):
@@ -235,8 +262,7 @@ def ensemble_to_state(state_ens, my_ESN, before_readout):
     return state
 
 
-# NEEDS TO CHANGE
-def forecast(state_ens, action, frame_skip, B, lin, ik, dt):
+def forecast(state_ens, action, frame_skip, my_ESN, before_readout):
     """
     Forecast the state ensemble over a number of steps.
 
@@ -244,19 +270,20 @@ def forecast(state_ens, action, frame_skip, B, lin, ik, dt):
         state_ens: Ensemble of states. Shape [n_ensemble, n_state].
         action: Action applied to the system.
         frame_skip: Number of steps to advance.
-        B, lin, ik, dt: KS model parameters.
 
     Returns:
         Updated state ensemble.
     """
 
-    def step_fn(state, _):
-        return (
-            jax.vmap(
-                KS.advance_f, in_axes=(-1, None, None, None, None, None), out_axes=-1
-            )(state, action, B, lin, ik, dt),
-            None,
-        )
+    def closed_loop_step_fn(x):
+        # Closed-loop step of ESN
+        x_augmented = before_readout(x, my_ESN.output_bias)
+        y = jnp.dot(x_augmented, my_ESN.W_out)
+        x_next = jesn.step(my_ESN, x, y, action)
+        return x_next
+
+    def step_fn(x, _):
+        return (jax.vmap(closed_loop_step_fn, in_axes=-1, out_axes=-1)(x), None)
 
     # Use lax.scan to iterate over frame_skip and advance the state
     state_ens, _ = jax.lax.scan(step_fn, state_ens, jnp.arange(frame_skip))
@@ -315,13 +342,13 @@ def after_EnKF_r1(x):
     return x
 
 
-def after_EnKF_r2(x):
+def after_EnKF_r2(x, y):
     # to go back to r from r2 mode
-    x2 = x.at[1::2].set(jnp.sqrt(jnp.maximum(x[1::2], 0)))
+    x2 = x.at[1::2].set(jnp.sign(y[1::2]) * jnp.sqrt(jnp.maximum(x[1::2], 0)))
     return x2
 
 
-def apply_enKF(m, k, Af, d, Cdd, M, my_ESN, before_EnKF, after_EnKF, key, rho=1.0):
+def apply_enKF(m, Af, d, Cdd, M, my_ESN, before_EnKF, after_EnKF, key, rho=1.0):
     # get the reservoir state before readout
     # before the readout because we need our observation matrix to be linear
     # if we're using r2 mode then the EnKF is applied on the r2 state
@@ -331,7 +358,7 @@ def apply_enKF(m, k, Af, d, Cdd, M, my_ESN, before_EnKF, after_EnKF, key, rho=1.
     # remove the bias from the data
     Aa_full = EnKF(m, Af_full, d - my_ESN.observation_bias, Cdd, M, key)
 
-    Aa = after_EnKF(Aa_full)
+    Aa = after_EnKF(Aa_full, Af)
 
     # inflate analysed state ensemble
     # helps with the collapse of variance when using small ensemble
@@ -339,7 +366,6 @@ def apply_enKF(m, k, Af, d, Cdd, M, my_ESN, before_EnKF, after_EnKF, key, rho=1.
     return Aa
 
 
-# CHECK WHERE CONFIG IS USED
 def generate_training_episode(config, env, episode_type="null_action"):
     # create a action of zeros to pass
     null_action = jnp.zeros(env.action_size)
@@ -620,8 +646,8 @@ def generate_training_episode(config, env, episode_type="null_action"):
             reward_arr,
             (reward_arr.shape[0] * reward_arr.shape[1],),
         )
-        stack = lambda a, b, c: jnp.vstack((jnp.expand_dims(a, axis=0), b, c))
-        hstack = lambda a, b, c: jnp.hstack((jnp.expand_dims(a, axis=0), b, c))
+        stack = lambda a, b: jnp.vstack((jnp.expand_dims(a, axis=0), b))
+        hstack = lambda a, b: jnp.hstack((jnp.expand_dims(a, axis=0), b))
 
         return (
             stack(init_true_state, true_state_arr),
@@ -639,7 +665,7 @@ def generate_training_episode(config, env, episode_type="null_action"):
 
 def train_ESN(config, env, key):
     key, key_env, key_obs, key_action = jax.random.split(key, 4)
-    esn_config = config.ESN
+    esn_config = config.esn
     episode = generate_training_episode(
         config, env, episode_type=esn_config.episode_type
     )
@@ -814,48 +840,98 @@ def train_ESN(config, env, key):
         N_transient_steps=N_transient,
         train_idx_list=train_idxs,
         val_idx_list=val_idxs,
-        random_seed=esn_config.val.seed,
+        random_seed=esn_config.seed,
         error_measure=error_measure,
         network_dt=esn_config.model.network_dt,
     )
 
-    print("Testing on the test set.", flush=True)
+    print("Train JAX ESN with the same hyperparameters.", flush=True)
     hyp_params = []
     for name in hyp_param_names:
-        hyp_params.extend(min_dict[name][0])
-    hyp_param_scales_ = ["uniform"] * len(hyp_param_names)
+        hyp_params.append(min_dict[name][0])
+
+    # hyp_param_scales_ = ["uniform"] * len(hyp_param_names)
     # after validation, hyperparameters are saved with uniform scaling
 
     # fix the seeds
-    my_ESN = ESN(
-        input_seeds=[config.val.seed + 1, config.val.seed + 2, config.val.seed + 3],
-        reservoir_seeds=[config.val.seed + 4, config.val.seed + 5],
+    # my_ESN = ESN(
+    #     input_seeds=[config.val.seed + 1, config.val.seed + 2, config.val.seed + 3],
+    #     reservoir_seeds=[config.val.seed + 4, config.val.seed + 5],
+    #     **ESN_dict,
+    # )
+    # set_ESN(my_ESN, hyp_param_names, hyp_param_scales_, hyp_params)
+    # my_ESN.train(
+    #     DATA["u_washout"],
+    #     DATA["u"],
+    #     DATA["y"],
+    #     P_washout=DATA["p_washout"],
+    #     P_train=DATA["p"],
+    #     train_idx_list=train_idxs,
+    # )
+    # print("Testing on the test set.", flush=True)
+    # for episode_idx in test_idxs:
+    #     _, y_pred = my_ESN.closed_loop_with_washout(
+    #         U_washout=DATA["u_washout"][episode_idx],
+    #         P_washout=DATA["p_washout"][episode_idx],
+    #         P=DATA["p"][episode_idx],
+    #         N_t=len(DATA["u_washout"][episode_idx]),
+    #     )
+    #     y_pred = y_pred[1:]
+    #     episode_error = error_measure(DATA["y"][episode_idx], y_pred)
+    #     print(f"Error test episode {episode_idx}: {episode_error:.4f}")
+    #     # plot prediction on test set and save it in the folder
+
+    my_ESN = JESN(
+        input_seed=esn_config.seed + 1,
+        reservoir_seed=esn_config.seed + 2,
+        verbose=False,
         **ESN_dict,
     )
-    set_ESN(my_ESN, hyp_param_names, hyp_param_scales_, hyp_params)
+    for hyp_param_name, hyp_param in zip(hyp_param_names, hyp_params):
+        setattr(my_ESN, hyp_param_name, hyp_param)
 
-    my_ESN.train(
+    before_readout = (
+        jesn.before_readout_r2 if my_ESN.r2_mode == True else jesn.before_readout_r1
+    )
+    # convert back to jax arrray?
+    W_out = jesn.train(
+        my_ESN,
         DATA["u_washout"],
         DATA["u"],
         DATA["y"],
-        P_washout=DATA["p_washout"],
-        P_train=DATA["p"],
+        DATA["p_washout"],
+        DATA["p"],
         train_idx_list=train_idxs,
+        before_readout=before_readout,
     )
+    my_ESN.output_weights = W_out
+
+    print("Testing on the test set.", flush=True)
     for episode_idx in test_idxs:
-        _, y_pred = my_ESN.closed_loop_with_washout(
+        _, y_pred = jesn.closed_loop_with_washout(
+            my_ESN,
             U_washout=DATA["u_washout"][episode_idx],
-            P_washout=DATA["train"]["p_washout"][episode_idx],
-            P=DATA["train"]["p"][episode_idx],
-            N_t=len(DATA["u_washout"][episode_idx]),
+            P_washout=DATA["p_washout"][episode_idx],
+            P=DATA["p"][episode_idx],
+            N_t=len(DATA["u"][episode_idx]),
+            before_readout=before_readout,
         )
         y_pred = y_pred[1:]
-        episode_error = error_measure(DATA["y"][episode_idx], y_pred)
-        print(f"Error test episode {episode_idx}: {episode_error:.4f}")
-        # plot prediction on test set and save it in the folder
-    return ESN_dict, dict(
-        (name, param) for (name, param) in zip(hyp_param_names, hyp_params)
-    )
+
+        # plt_idxs = [int(my_idx) for my_idx in np.linspace(0,my_ESN.N_dim-1,5)]
+        # plt.figure(figsize=(5*len(plt_idxs),5))
+        # for k, plt_idx in enumerate(plt_idxs):
+        #     plt.subplot(1,len(plt_idxs),k+1)
+        #     plt.plot(DATA['t'][episode_idx],DATA['y'][episode_idx][:,plt_idx])
+        #     plt.plot(DATA['t'][episode_idx],y_pred[:,plt_idx],'--')
+        #     # plt.xlim([0,500])
+        # plt.figure(figsize=(20,5))
+        # plt.subplot(2,1,1)
+        # plt.imshow(DATA['y'][episode_idx].T, aspect='auto')
+        # plt.subplot(2,1,2)
+        # plt.imshow(y_pred.T, aspect='auto')
+        # plt.show()
+    return my_ESN
 
 
 def run_experiment(
@@ -868,7 +944,7 @@ def run_experiment(
 
     # initialize networks
     # sample state and action to get the correct shape
-    state_0 = jnp.array([jnp.zeros(model.N)])
+    state_0 = jnp.array([jnp.zeros(model.N_dim)])
     action_0 = jnp.array([jnp.zeros(env.action_size)])
     actor_state, critic_state = agent.initial_network_state(
         key_network, state_0, action_0
@@ -896,13 +972,13 @@ def run_experiment(
     # initialize buffer
     replay_buffer = init_replay_buffer(
         capacity=config.replay_buffer.capacity,
-        state_dim=(model.N,),
+        state_dim=(model.N_dim,),
         action_dim=(env.action_size,),
         rng_key=key_buffer,
     )
 
     # get the observation matrix that maps state to observations
-    obs_mat = get_observation_matrix(model.N, model.L, env.observation_locs)
+    obs_mat = get_observation_matrix(model, env.observation_inds)
 
     # standard deviation of the exploration scales with the range of actions in the environment
     exploration_stddev = (
@@ -913,11 +989,11 @@ def run_experiment(
     null_action = jnp.zeros(env.action_size)
 
     # jit the necessary environment functions
+    N_washout = pp.get_steps(config.esn.model.washout_time, config.esn.model.network_dt)
     model_initialize_ensemble = partial(
-        initialize_ensemble,
-        env_N=env.N,
-        model_N=model.N,
-        model_k=model.k,
+        initialize_ensemble_with_auto_washout,
+        my_ESN=model,
+        N_washout=N_washout,
         std_init=config.enKF.std_init,
         m=config.enKF.m,
     )
@@ -962,40 +1038,39 @@ def run_experiment(
     )
     env_sample_action = jax.jit(env_sample_action)
 
+    before_readout = (
+        jesn.before_readout_r2 if model.r2_mode == True else jesn.before_readout_r1
+    )
     model_forecast = partial(
-        forecast,
-        frame_skip=env.frame_skip,
-        B=model.B,
-        lin=model.lin,
-        ik=model.ik,
-        dt=model.dt,
+        forecast, frame_skip=env.frame_skip, my_ESN=model, before_readout=before_readout
     )
     model_forecast = jax.jit(model_forecast)
 
+    before_EnKF = before_EnKF_r2 if model.r2_mode == True else jesn.before_EnKF_r1
+    after_EnKF = after_EnKF_r2 if model.r2_mode == True else jesn.after_EnKF_r1
     model_apply_enKF = partial(
         apply_enKF,
         m=config.enKF.m,
-        k=len(model.k),
         M=obs_mat,
+        my_ESN=model,
+        before_EnKF=before_EnKF,
+        after_EnKF=after_EnKF,
         rho=config.enKF.inflation_factor,
     )
     model_apply_enKF = jax.jit(model_apply_enKF)
 
-    model_target = KSenv.determine_target(
-        target=config.env.target,
-        N=model.N,
-        action_size=env.action_size,
-        B=model.B,
-        lin=model.lin,
-        ik=model.ik,
-        dt=model.dt,
-    )
+    model_target = env.target  # ONLY WORKS IF MODEL OUTPUT IS SAME AS ENV DIMENSION
     get_model_reward = partial(
         KSenv.get_reward,
         target=model_target,
         actuator_loss_weight=env.actuator_loss_weight,
     )
     get_model_reward = jax.jit(get_model_reward)
+
+    model_ensemble_to_state = partial(
+        ensemble_to_state, my_ESN=model, before_readout=before_readout
+    )
+    model_ensemble_to_state = jax.jit(model_ensemble_to_state)
 
     def until_first_observation(true_state, true_obs, state_ens, observation_starts):
         def body_fun(carry, _):
@@ -1007,7 +1082,7 @@ def run_experiment(
             )
             # advance model
             state_ens = model_forecast(state_ens=state_ens, action=action)
-            state = ensemble_to_state(state_ens)
+            state = model_ensemble_to_state(state_ens)
             reward_model = get_model_reward(next_state=state, action=action)
 
             return (true_state, true_obs, state_ens), (
@@ -1052,7 +1127,7 @@ def run_experiment(
     ):
         def forecast_fun(carry, _):
             true_state, true_obs, state_ens = carry
-            state = ensemble_to_state(state_ens)
+            state = model_ensemble_to_state(state_ens)
 
             # get action
             action = agent.actor.apply(params, state)
@@ -1064,7 +1139,7 @@ def run_experiment(
 
             # forecast
             state_ens = model_forecast(state_ens=state_ens, action=action)
-            state = ensemble_to_state(state_ens)
+            state = model_ensemble_to_state(state_ens)
             reward_model = get_model_reward(next_state=state, action=action)
 
             return (true_state, true_obs, state_ens), (
@@ -1150,7 +1225,7 @@ def run_experiment(
     ):
         def forecast_fun(carry, _):
             true_state, true_obs, state_ens, key_action, replay_buffer = carry
-            state = ensemble_to_state(state_ens)
+            state = model_ensemble_to_state(state_ens)
 
             # get action
             key_action, _ = jax.random.split(key_action)
@@ -1163,7 +1238,7 @@ def run_experiment(
 
             # forecast
             next_state_ens = model_forecast(state_ens=state_ens, action=action)
-            next_state = ensemble_to_state(next_state_ens)
+            next_state = model_ensemble_to_state(next_state_ens)
             reward_model = get_model_reward(next_state=next_state, action=action)
 
             # choose which reward
@@ -1281,7 +1356,7 @@ def run_experiment(
                 critic_state,
             ) = carry
 
-            state = ensemble_to_state(state_ens)
+            state = model_ensemble_to_state(state_ens)
 
             # get action from the learning actor network
             action = agent.actor.apply(actor_state.params, state)
@@ -1301,7 +1376,7 @@ def run_experiment(
 
             # forecast
             next_state_ens = model_forecast(state_ens=state_ens, action=action)
-            next_state = ensemble_to_state(next_state_ens)
+            next_state = model_ensemble_to_state(next_state_ens)
             reward_model = get_model_reward(next_state=state, action=action)
 
             # choose which reward
@@ -1528,7 +1603,9 @@ def run_experiment(
         init_reward = jnp.nan
 
         # initialize enKF
-        init_state_ens = model_initialize_ensemble(u0=init_true_state_mean, key=key_ens)
+        init_state_ens = model_initialize_ensemble(
+            u0=init_true_state_mean, p0=null_action, key=key_ens
+        )
 
         # forecast until first observation
         (
@@ -1622,7 +1699,9 @@ def run_experiment(
         init_reward = jnp.nan
 
         # initialize enKF
-        init_state_ens = model_initialize_ensemble(u0=init_true_state_mean, key=key_ens)
+        init_state_ens = model_initialize_ensemble(
+            u0=init_true_state_mean, p0=null_action, key=key_ens
+        )
 
         # forecast until first observation
         (
@@ -1724,7 +1803,9 @@ def run_experiment(
         init_reward = jnp.nan
 
         # initialize enKF
-        init_state_ens = model_initialize_ensemble(u0=init_true_state_mean, key=key_ens)
+        init_state_ens = model_initialize_ensemble(
+            u0=init_true_state_mean, p0=null_action, key=key_ens
+        )
 
         # forecast until first observation
         (
@@ -1874,6 +1955,7 @@ def run_experiment(
                     true_obs_arr,
                     obs_arr,
                     state_ens_arr,
+                    before_readout,
                     action_arr,
                     reward_env_arr,
                     reward_model_arr,
@@ -1955,6 +2037,7 @@ def run_experiment(
                     true_obs_arr,
                     obs_arr,
                     state_ens_arr,
+                    before_readout,
                     action_arr,
                     reward_env_arr,
                     reward_model_arr,
@@ -2044,6 +2127,7 @@ def run_experiment(
                             true_obs_arr,
                             obs_arr,
                             state_ens_arr,
+                            before_readout,
                             action_arr,
                             reward_env_arr,
                             reward_model_arr,
@@ -2136,6 +2220,7 @@ def run_experiment(
                     true_obs_arr,
                     obs_arr,
                     state_ens_arr,
+                    before_readout,
                     action_arr,
                     reward_env_arr,
                     reward_model_arr,
@@ -2216,6 +2301,9 @@ def main(_):
     # add environment config to the config
     config.env = FLAGS.env_config
 
+    # add esn config to the config
+    config.esn = FLAGS.esn_config
+
     fp.save_config(FLAGS.experiment_path, config)
 
     # initialize wandb logging
@@ -2248,15 +2336,14 @@ def main(_):
 
     # validate and train an ESN
     print("Training Echo State Network.", flush=True)
-    ESN_dict, hyp_params_dict = train_ESN(config, env, key_ESN)
-    model = JESN(
-        input_seed=config.esn.seed + 1, reservoir_seed=config.esn.seed + 2, **ESN_dict
-    )
+    model = train_ESN(config, env, key_ESN)
 
-    # DOESN'T TAKE INTO VECTOR HYPERPARAMETERS LIKE IN SET_ESN FUNCTION!!
-    for hyp_param_name, hyp_param in enumerate(hyp_params_dict):
-        setattr(model, hyp_param_name, hyp_param)
+    # determine the bias term of the ESN for observations
+    model.observation_bias = jnp.multiply(
+        model.output_bias, model.W_out[-len(model.output_bias)]
+    )[env.observation_inds]
 
+    # running experiment with the trained model
     actor_state, critic_state = run_experiment(
         config, env, agent, model, key_experiment, wandb_run, logs, checkpoint_dir
     )

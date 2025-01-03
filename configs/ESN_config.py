@@ -3,6 +3,8 @@ import ml_collections
 
 def get_config():
     config = ml_collections.ConfigDict()
+    # seed for reproducibility
+    config.seed = 41
 
     # model configuration
     config.model = ml_collections.ConfigDict()
@@ -13,7 +15,7 @@ def get_config():
     config.model.network_dt = 5e-2
     config.model.washout_time = 5
 
-    config.model.reservoir_size = 3000
+    config.model.reservoir_size = 500
     config.model.connectivity = 3
     config.model.r2_mode = True
     config.model.input_weights_mode = "random_sparse"
@@ -33,10 +35,9 @@ def get_config():
     config.val.fold_time = 25
     config.val.n_folds = 3
     config.val.n_realisations = 3
-    config.val.n_calls = 20
-    config.val.n_initial_points = 10
+    config.val.n_calls = 10
+    config.val.n_initial_points = 5
     config.val.error_measure = "rel_L2"
-    config.val.seed = 41
 
     # Ranges for the hyperparameters
 
@@ -71,12 +72,12 @@ def get_config():
     config.val.hyperparameters.tikhonov.scale = "log10"
 
     # PARAMETER NORMALIZATION
-    config.val.hyperparameters.parameter_normalization_mean = (
-        ml_collections.ConfigDict()
-    )
-    config.val.hyperparameters.parameter_normalization_mean.min = -10.0
-    config.val.hyperparameters.parameter_normalization_mean.max = 10.0
-    config.val.hyperparameters.parameter_normalization_mean.scale = "uniform"
+    # config.val.hyperparameters.parameter_normalization_mean = (
+    #     ml_collections.ConfigDict()
+    # )
+    # config.val.hyperparameters.parameter_normalization_mean.min = -10.0
+    # config.val.hyperparameters.parameter_normalization_mean.max = 10.0
+    # config.val.hyperparameters.parameter_normalization_mean.scale = "uniform"
 
     config.val.hyperparameters.parameter_normalization_var = ml_collections.ConfigDict()
     config.val.hyperparameters.parameter_normalization_var.min = 0.01

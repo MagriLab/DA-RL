@@ -10,7 +10,7 @@ def get_config():
 
     config.seed = 41
 
-    config.total_steps = 100000
+    config.total_steps = 50000
     config.episode_steps = 1000
     config.learning_starts = 5000
     config.eval_freq = 5000
@@ -18,6 +18,8 @@ def get_config():
     config.eval_episodes = 5
 
     config.env = ml_collections.ConfigDict()
+
+    config.esn = ml_collections.ConfigDict()
 
     config.network = ml_collections.ConfigDict()
     config.network.actor_hidden_units = [256, 256]
@@ -43,5 +45,5 @@ def get_config():
     config.enKF.observation_starts = 100
     config.enKF.wait_steps = 10
     config.enKF.use_reward = "model"
-    config.enKF.inflation_factor = 1.0
+    config.enKF.inflation_factor = 1.05
     return config
