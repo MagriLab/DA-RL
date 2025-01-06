@@ -117,6 +117,7 @@ def loop(
     error_measure=errors.rmse,
     LT=None,  # only needed if error measure predictability horizon
     network_dt=None,  # only needed if error measure predictability horizon
+    rng=np.random.default_rng(seed=10),
 ):
     # initialize a base ESN object with unit input scaling and spectral radius
     # seeds not given, so the random generator creates a different seed each run
@@ -182,9 +183,7 @@ def loop(
             for fold in range(n_folds):
                 # select washout and validation
                 # start_step = fold * (N_val-N_washout)
-                start_step = np.random.randint(
-                    len(U_val[val_idx]) - (N_washout + N_val)
-                )
+                start_step = rng.integers(len(U_val[val_idx]) - (N_washout + N_val))
                 U_washout_fold = U_val[val_idx][
                     start_step : start_step + N_washout
                 ].copy()
@@ -269,6 +268,9 @@ def validate(
     LT=None,
     network_dt=None,
 ):
+    # set the seed
+    rng = np.random.default_rng(seed=random_seed)
+
     n_param = len(param_names)  # number of parameters
 
     # ranges for hyperparameters
@@ -323,6 +325,7 @@ def validate(
         error_measure=error_measure,
         LT=LT,
         network_dt=network_dt,
+        rng=rng,
     )
 
     res = run_gp_optimization(
