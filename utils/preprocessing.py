@@ -1,8 +1,8 @@
-import numpy as np
+import jax.numpy as jnp
 
 
 def get_steps(t, dt):
-    return int(np.round(t / dt))
+    return int(jnp.round(t / dt))
 
 
 def downsample(*y, t, new_dt):

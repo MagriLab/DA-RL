@@ -300,10 +300,9 @@ def apply_enKF(m, k, Af, d, Cdd, M, key, rho=1.0):
 
 
 def run_experiment(
-    config, env, agent, model, wandb_run=None, logs=None, checkpoint_dir=None
+    config, env, agent, model, key, wandb_run=None, logs=None, checkpoint_dir=None
 ):
     # random seed for initialization
-    key = jax.random.PRNGKey(config.seed)
     key, key_network, key_buffer, key_env, key_obs, key_action = jax.random.split(
         key, 6
     )
@@ -1693,8 +1692,11 @@ def main(_):
         actuator_scale=config.env.actuator_scale,
     )
 
+    key = jax.random.PRNGKey(config.seed)
+    _, key_experiment = jax.random.split(key)
+
     actor_state, critic_state = run_experiment(
-        config, env, agent, model, wandb_run, logs, checkpoint_dir
+        config, env, agent, model, key_experiment, wandb_run, logs, checkpoint_dir
     )
 
     # finish logging

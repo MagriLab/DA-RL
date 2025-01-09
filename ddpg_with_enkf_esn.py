@@ -30,12 +30,11 @@ from utils.system import set_gpu
 from utils import preprocessing as pp
 
 import numpy as np
-from esn.esn import ESN
-from esn.validation import validate, set_ESN
+from esn.validation import validate
 from esn.utils import errors, scalers
 import jax_esn.esn as jesn
 from jax_esn.esn import ESN as JESN
-import matplotlib.pyplot as plt
+from jax_esn.utils import errors as jax_errors
 
 # system config
 FLAGS = flags.FLAGS
@@ -196,13 +195,33 @@ def initialize_ensemble_with_auto_washout(my_ESN, N_washout, u0, p0, std_init, m
     key, subkey = jax.random.split(key)
 
     # Sample ensemble of u0
-    u0_sampled = jax.random.multivariate_normal(
-        subkey,
-        u0,
-        jnp.diag((u0 * std_init) ** 2),
-        shape=(m,),
+    # u0_sampled = jax.random.multivariate_normal(
+    #     subkey,
+    #     u0,
+    #     jnp.diag((u0 * std_init) ** 2),
+    #     shape=(m,),
+    #     method="svd",
+    # )
+
+    u0_f = jnp.fft.rfft(u0, axis=-1)
+    key, subkey = jax.random.split(key)
+    u0_real = jax.random.multivariate_normal(
+        key,
+        u0_f.real,
+        jnp.diag((u0_f.real * std_init) ** 2),
+        (m,),
         method="svd",
     )
+    # covariance matrix is rank deficient because zeroth
+    u0_complex = jax.random.multivariate_normal(
+        subkey,
+        u0_f.imag,
+        jnp.diag((u0_f.imag * std_init) ** 2),
+        (m,),
+        method="svd",
+    )
+    u0_f_sampled = u0_real + u0_complex * 1j
+    u0_sampled = jax.vmap(lambda x: jnp.fft.irfft(x))(u0_f_sampled)
 
     # Prepare p_washout for all members (shape: [N_washout, param_dim])
     p_washout = jnp.tile(p0[None, :], (N_washout, 1))  # Repeat p0 over washout steps
@@ -226,17 +245,41 @@ def initialize_ensemble_with_auto_washout(my_ESN, N_washout, u0, p0, std_init, m
     return r0_ens.T
 
 
-def draw_initial_condition(u0, std_init, key):
-    key, subkey = jax.random.split(key)
+# def draw_initial_condition(u0, std_init, key):
+#     key, subkey = jax.random.split(key)
 
-    u0_sampled = jax.random.multivariate_normal(
+#     u0_sampled = jax.random.multivariate_normal(
+#         key,
+#         u0,
+#         jnp.diag((u0 * std_init) ** 2),
+#         (1,),
+#         method="svd",
+#     )
+#     return u0_sampled.squeeze()
+
+
+def draw_initial_condition(u0, std_init, key):
+    # fourier transform the initial condition
+    u0_f = jnp.fft.rfft(u0, axis=-1)
+    key, subkey = jax.random.split(key)
+    u0_real = jax.random.multivariate_normal(
         key,
-        u0,
-        jnp.diag((u0 * std_init) ** 2),
+        u0_f.real,
+        jnp.diag((u0_f.real * std_init) ** 2),
         (1,),
         method="svd",
     )
-    return u0_sampled.squeeze()
+    # covariance matrix is rank deficient because zeroth
+    u0_complex = jax.random.multivariate_normal(
+        subkey,
+        u0_f.imag,
+        jnp.diag((u0_f.imag * std_init) ** 2),
+        (1,),
+        method="svd",
+    )
+    u0_f = u0_real + u0_complex * 1j
+    u0 = jnp.fft.irfft(u0_f.squeeze())
+    return u0
 
 
 def get_observation_matrix(my_ESN, observation_indices):
@@ -663,11 +706,85 @@ def generate_training_episode(config, env, episode_type="null_action"):
     return episode
 
 
+def predictability_horizon(y, y_pred, threshold=0.2):
+    # Predictability horizon defined as in Racca & Magri, Neural Networks, 2021.
+    nom = jnp.linalg.norm(y - y_pred, axis=1)
+    denom = jnp.sqrt(
+        jnp.cumsum(jnp.linalg.norm(y, axis=1) ** 2) / jnp.arange(1, len(y) + 1)
+    )
+    eps = nom / denom
+    PH_list = jnp.where(eps > threshold)[0]
+    if len(PH_list) == 0:
+        print("Predictability horizon longer than given time series.")
+        PH = len(y)
+    else:
+        PH = PH_list[0]
+    return PH
+
+
+def test_prediction(
+    my_ESN,
+    before_readout,
+    U_washout,
+    P_washout,
+    U_test,
+    P_test,
+    Y_test,
+    N_washout,
+    N_val,
+    n_folds,
+    error_measure,
+    key,
+):
+    fold_error = jnp.zeros(n_folds)
+    for fold in range(n_folds):
+        # select washout and validation
+        # start_step = fold * (N_val-N_washout)
+        key, _ = jax.random.split(key)
+        start_step = jax.random.randint(
+            key=key, shape=(1,), minval=0, maxval=len(U_test) - (N_washout + N_val)
+        )[0]
+        U_washout_fold = U_test[start_step : start_step + N_washout]
+        Y_test_fold = Y_test[start_step + N_washout : start_step + N_washout + N_val]
+        P_washout_fold = P_test[start_step : start_step + N_washout]
+        P_test_fold = P_test[start_step + N_washout : start_step + N_washout + N_val]
+
+        # predict output validation in closed-loop
+        _, Y_test_pred = jesn.closed_loop_with_washout(
+            my_ESN,
+            U_washout=U_washout_fold,
+            N_t=N_val,
+            P_washout=P_washout_fold,
+            P=P_test_fold,
+            before_readout=before_readout,
+        )
+        Y_test_pred = Y_test_pred[1:, :]
+        fold_error = fold_error.at[fold].set(error_measure(Y_test_fold, Y_test_pred))
+
+    episode_test_error = jnp.mean(fold_error)
+
+    # test on the whole episode
+    _, y_pred = jesn.closed_loop_with_washout(
+        my_ESN,
+        U_washout=U_washout,
+        P_washout=P_washout,
+        P=P_test,
+        N_t=len(U_test),
+        before_readout=before_readout,
+    )
+    y_pred = y_pred[1:]
+    # Determine the predictability horizon
+    episode_PH = predictability_horizon(Y_test, y_pred)
+
+    # Determine the error of entire episode
+    episode_error = error_measure(Y_test, y_pred)
+    return episode_test_error, episode_error, episode_PH, y_pred
+
+
 def train_ESN(config, env, key):
     key, key_env, key_obs, key_action = jax.random.split(key, 4)
-    esn_config = config.esn
     episode = generate_training_episode(
-        config, env, episode_type=esn_config.episode_type
+        config, env, episode_type=config.esn.episode_type
     )
 
     # Define batched random keys for parallel processing
@@ -677,7 +794,7 @@ def train_ESN(config, env, key):
 
     # Create batched keys for all episodes
     total_episodes = (
-        esn_config.train_episodes + esn_config.val_episodes + esn_config.test_episodes
+        config.esn.train_episodes + config.esn.val_episodes + config.esn.test_episodes
     )
     batch_keys_env = jax.random.split(subkey_env, total_episodes)
     batch_keys_obs = jax.random.split(subkey_obs, total_episodes)
@@ -717,19 +834,19 @@ def train_ESN(config, env, key):
         RAW_DATA["action"]
     )
 
-    train_idxs = np.arange(esn_config.train_episodes)
+    train_idxs = np.arange(config.esn.train_episodes)
     val_idxs = np.arange(
-        esn_config.train_episodes, esn_config.train_episodes + esn_config.val_episodes
+        config.esn.train_episodes, config.esn.train_episodes + config.esn.val_episodes
     )
     test_idxs = np.arange(
-        esn_config.train_episodes + esn_config.val_episodes,
-        esn_config.train_episodes + esn_config.val_episodes + esn_config.test_episodes,
+        config.esn.train_episodes + config.esn.val_episodes,
+        config.esn.train_episodes + config.esn.val_episodes + config.esn.test_episodes,
     )
     idxs_list = np.concatenate((train_idxs, val_idxs, test_idxs), axis=None)
 
     total_time = env.dt * config.episode_steps
-    train_time = total_time - esn_config.model.washout_time
-    network_dt = esn_config.model.network_dt
+    train_time = total_time - config.esn.model.washout_time
+    network_dt = config.esn.model.network_dt
     t = env.dt * jnp.arange(config.episode_steps + 1)
 
     loop_times = [train_time]
@@ -744,8 +861,8 @@ def train_ESN(config, env, key):
     }
 
     for i in idxs_list:
-        y = RAW_DATA[esn_config.model.which_state][i]
-        a = RAW_DATA[esn_config.model.which_control][i][1:]
+        y = RAW_DATA[config.esn.model.which_state][i]
+        a = RAW_DATA[config.esn.model.which_control][i][1:]
 
         full_state = RAW_DATA["true_state"][i]
 
@@ -756,7 +873,7 @@ def train_ESN(config, env, key):
             a,
             network_dt,
             transient_time=0,
-            washout_time=esn_config.model.washout_time,
+            washout_time=config.esn.model.washout_time,
             loop_times=loop_times,
         )
         [
@@ -772,18 +889,18 @@ def train_ESN(config, env, key):
     print("Dimension", dim)
     print("Creating hyperparameter search range.", flush=True)
 
-    hyp_param_names = [name for name in esn_config.val.hyperparameters.keys()]
+    hyp_param_names = [name for name in config.esn.val.hyperparameters.keys()]
 
     # scale for the hyperparameter range
     hyp_param_scales = [
-        esn_config.val.hyperparameters[name].scale for name in hyp_param_names
+        config.esn.val.hyperparameters[name].scale for name in hyp_param_names
     ]
 
     # range for hyperparameters
     grid_range = [
         [
-            esn_config.val.hyperparameters[name].min,
-            esn_config.val.hyperparameters[name].max,
+            config.esn.val.hyperparameters[name].min,
+            config.esn.val.hyperparameters[name].max,
         ]
         for name in hyp_param_names
     ]
@@ -797,15 +914,15 @@ def train_ESN(config, env, key):
     # create base ESN
     ESN_dict = {
         "dimension": dim,
-        "reservoir_size": esn_config.model.reservoir_size,
+        "reservoir_size": config.esn.model.reservoir_size,
         "parameter_dimension": action_dim,
-        "reservoir_connectivity": esn_config.model.connectivity,
-        "r2_mode": esn_config.model.r2_mode,
-        "input_weights_mode": esn_config.model.input_weights_mode,
-        "reservoir_weights_mode": esn_config.model.reservoir_weights_mode,
-        "tikhonov": esn_config.tikhonov,
+        "reservoir_connectivity": config.esn.model.connectivity,
+        "r2_mode": config.esn.model.r2_mode,
+        "input_weights_mode": config.esn.model.input_weights_mode,
+        "reservoir_weights_mode": config.esn.model.reservoir_weights_mode,
+        "tikhonov": config.esn.tikhonov,
     }
-    if esn_config.model.normalize_input:
+    if config.esn.model.normalize_input:
         data_mean = np.mean(np.vstack(DATA["u"]), axis=0)
         data_std = np.std(np.vstack(DATA["u"]), axis=0)
         ESN_dict["input_normalization"] = [data_mean, data_std]
@@ -813,17 +930,17 @@ def train_ESN(config, env, key):
             [1.0]
         )  # if subtracting the mean, need the output bias
 
-    N_washout = pp.get_steps(esn_config.model.washout_time, esn_config.model.network_dt)
-    N_val = pp.get_steps(esn_config.val.fold_time, esn_config.model.network_dt)
+    N_washout = pp.get_steps(config.esn.model.washout_time, config.esn.model.network_dt)
+    N_val = pp.get_steps(config.esn.val.fold_time, config.esn.model.network_dt)
     N_transient = 0
-    error_measure = getattr(errors, esn_config.val.error_measure)
+    error_measure = getattr(errors, config.esn.val.error_measure)
     print("Starting validation.", flush=True)
     min_dict = validate(
         grid_range,
         hyp_param_names,
         hyp_param_scales,
-        n_calls=esn_config.val.n_calls,
-        n_initial_points=esn_config.val.n_initial_points,
+        n_calls=config.esn.val.n_calls,
+        n_initial_points=config.esn.val.n_initial_points,
         ESN_dict=ESN_dict,
         U_washout_train=DATA["u_washout"],
         U_train=DATA["u"],
@@ -833,57 +950,28 @@ def train_ESN(config, env, key):
         P_washout_train=DATA["p_washout"],
         P_train=DATA["p"],
         P_val=DATA["p"],
-        n_folds=esn_config.val.n_folds,
-        n_realisations=esn_config.val.n_realisations,
+        n_folds=config.esn.val.n_folds,
+        n_realisations=config.esn.val.n_realisations,
         N_washout_steps=N_washout,
         N_val_steps=N_val,
         N_transient_steps=N_transient,
         train_idx_list=train_idxs,
         val_idx_list=val_idxs,
-        random_seed=esn_config.seed,
+        random_seed=config.esn.seed,
         error_measure=error_measure,
-        network_dt=esn_config.model.network_dt,
+        network_dt=config.esn.model.network_dt,
     )
+    # Save the hyperparameters
+    fp.write_h5(FLAGS.experiment_path / "esn_hyperparameters.h5", min_dict)
 
     print("Train JAX ESN with the same hyperparameters.", flush=True)
     hyp_params = []
     for name in hyp_param_names:
         hyp_params.append(min_dict[name][0])
 
-    # hyp_param_scales_ = ["uniform"] * len(hyp_param_names)
-    # after validation, hyperparameters are saved with uniform scaling
-
-    # fix the seeds
-    # my_ESN = ESN(
-    #     input_seeds=[config.val.seed + 1, config.val.seed + 2, config.val.seed + 3],
-    #     reservoir_seeds=[config.val.seed + 4, config.val.seed + 5],
-    #     **ESN_dict,
-    # )
-    # set_ESN(my_ESN, hyp_param_names, hyp_param_scales_, hyp_params)
-    # my_ESN.train(
-    #     DATA["u_washout"],
-    #     DATA["u"],
-    #     DATA["y"],
-    #     P_washout=DATA["p_washout"],
-    #     P_train=DATA["p"],
-    #     train_idx_list=train_idxs,
-    # )
-    # print("Testing on the test set.", flush=True)
-    # for episode_idx in test_idxs:
-    #     _, y_pred = my_ESN.closed_loop_with_washout(
-    #         U_washout=DATA["u_washout"][episode_idx],
-    #         P_washout=DATA["p_washout"][episode_idx],
-    #         P=DATA["p"][episode_idx],
-    #         N_t=len(DATA["u_washout"][episode_idx]),
-    #     )
-    #     y_pred = y_pred[1:]
-    #     episode_error = error_measure(DATA["y"][episode_idx], y_pred)
-    #     print(f"Error test episode {episode_idx}: {episode_error:.4f}")
-    #     # plot prediction on test set and save it in the folder
-
     my_ESN = JESN(
-        input_seed=esn_config.seed + 1,
-        reservoir_seed=esn_config.seed + 2,
+        input_seed=config.esn.seed + 1,
+        reservoir_seed=config.esn.seed + 2,
         verbose=False,
         **ESN_dict,
     )
@@ -907,30 +995,55 @@ def train_ESN(config, env, key):
     my_ESN.output_weights = W_out
 
     print("Testing on the test set.", flush=True)
-    for episode_idx in test_idxs:
-        _, y_pred = jesn.closed_loop_with_washout(
+    n_plot = config.plot_freq // config.episode_steps
+
+    test_error = jnp.zeros(len(test_idxs))
+    total_error = jnp.zeros(len(test_idxs))
+    PH = jnp.zeros(len(test_idxs))
+
+    error_measure = getattr(jax_errors, config.esn.val.error_measure)
+
+    for i, episode_idx in enumerate(test_idxs):
+        # test on folds in the same way as the validation
+        episode_test_error, episode_total_error, episode_PH, y_pred = test_prediction(
             my_ESN,
+            before_readout,
             U_washout=DATA["u_washout"][episode_idx],
             P_washout=DATA["p_washout"][episode_idx],
-            P=DATA["p"][episode_idx],
-            N_t=len(DATA["u"][episode_idx]),
-            before_readout=before_readout,
+            U_test=DATA["u"][episode_idx],
+            Y_test=DATA["y"][episode_idx],
+            P_test=DATA["p"][episode_idx],
+            N_washout=N_washout,
+            N_val=N_val,
+            n_folds=config.esn.val.n_folds,
+            error_measure=error_measure,
+            key=key,
         )
-        y_pred = y_pred[1:]
+        key, _ = jax.random.split(key)
+        test_error = test_error.at[i].set(episode_test_error)
+        total_error = total_error.at[i].set(episode_total_error)
+        PH = PH.at[i].set(episode_PH)
 
-        # plt_idxs = [int(my_idx) for my_idx in np.linspace(0,my_ESN.N_dim-1,5)]
-        # plt.figure(figsize=(5*len(plt_idxs),5))
-        # for k, plt_idx in enumerate(plt_idxs):
-        #     plt.subplot(1,len(plt_idxs),k+1)
-        #     plt.plot(DATA['t'][episode_idx],DATA['y'][episode_idx][:,plt_idx])
-        #     plt.plot(DATA['t'][episode_idx],y_pred[:,plt_idx],'--')
-        #     # plt.xlim([0,500])
-        # plt.figure(figsize=(20,5))
-        # plt.subplot(2,1,1)
-        # plt.imshow(DATA['y'][episode_idx].T, aspect='auto')
-        # plt.subplot(2,1,2)
-        # plt.imshow(y_pred.T, aspect='auto')
-        # plt.show()
+        print(
+            f"Test episode {i+1}: Test error = {test_error[i]}, Total Error = {total_error[i]}, PH = {PH[i]} time steps",
+            flush=True,
+        )
+
+        # Plot and save the prediction
+        if i == 0 or (i + 1) % n_plot == 0:
+            if FLAGS.make_plots == True:
+                fig = vis.plot_prediction(
+                    x=env.ks_solver.x,
+                    t=DATA["t"][episode_idx],
+                    y=DATA["y"][episode_idx],
+                    y_pred=y_pred,
+                )
+                fig.savefig(FLAGS.experiment_path / "plots" / f"test_episode_{i+1}.png")
+
+    print(
+        f"\n Ave. Test error = {jnp.mean(test_error)}, Total Error = {jnp.mean(total_error)}, PH = {jnp.mean(PH)} time steps",
+        flush=True,
+    )
     return my_ESN
 
 
@@ -941,6 +1054,9 @@ def run_experiment(
     key, key_network, key_buffer, key_env, key_obs, key_action = jax.random.split(
         key, 6
     )
+
+    # random seed for ESN evaluation
+    key, key_ESN = jax.random.split(key)
 
     # initialize networks
     # sample state and action to get the correct shape
@@ -2089,6 +2205,10 @@ def run_experiment(
             eval_ave_reward_model = 0
             eval_ave_last_reward_model = 0
 
+            test_error = jnp.zeros(config.eval_episodes)
+            total_error = jnp.zeros(config.eval_episodes)
+            PH = jnp.zeros(config.eval_episodes)
+
             for j in range(config.eval_episodes):
                 (
                     true_state_arr,
@@ -2118,6 +2238,49 @@ def run_experiment(
                 )
                 eval_ave_last_reward_model += reward_model_arr[-1]
 
+                # Evaluate the prediction performance of ESN
+                # Prepare episode data
+                total_time = env.dt * config.episode_steps
+                loop_time = total_time - config.esn.model.washout_time
+                t = env.dt * jnp.arange(config.episode_steps + 1)
+                episode_data = pp.create_dataset(
+                    full_state=true_state_arr,
+                    y=true_state_arr,
+                    t=t,
+                    p=action_arr[1:],
+                    network_dt=config.esn.model.network_dt,
+                    transient_time=0,
+                    washout_time=config.esn.model.washout_time,
+                    loop_times=[loop_time],
+                )
+                N_val = pp.get_steps(
+                    config.esn.val.fold_time, config.esn.model.network_dt
+                )
+                error_measure = getattr(jax_errors, config.esn.val.error_measure)
+                (
+                    episode_test_error,
+                    episode_total_error,
+                    episode_PH,
+                    y_pred,
+                ) = test_prediction(
+                    model,
+                    before_readout,
+                    U_washout=episode_data["loop_0"]["u_washout"],
+                    P_washout=episode_data["loop_0"]["p_washout"],
+                    U_test=episode_data["loop_0"]["u"],
+                    Y_test=episode_data["loop_0"]["y"],
+                    P_test=episode_data["loop_0"]["p"],
+                    N_washout=N_washout,
+                    N_val=N_val,
+                    n_folds=config.esn.val.n_folds,
+                    error_measure=error_measure,
+                    key=key_ESN,
+                )
+                key_ESN, _ = jax.random.split(key_ESN)
+                test_error = test_error.at[j].set(episode_test_error)
+                total_error = total_error.at[j].set(episode_total_error)
+                PH = PH.at[j].set(episode_PH)
+
                 if (i + 1) % n_plot == 0 and j == 0:
                     if FLAGS.make_plots == True:
                         fig = plot_KS_episode(
@@ -2137,6 +2300,19 @@ def run_experiment(
                         fig.savefig(
                             FLAGS.experiment_path / "plots" / f"eval_episode_{i+1}.png"
                         )
+
+                        fig = vis.plot_prediction(
+                            x=env.ks_solver.x,
+                            t=episode_data["loop_0"]["t"],
+                            y=episode_data["loop_0"]["y"],
+                            y_pred=y_pred,
+                        )
+                        fig.savefig(
+                            FLAGS.experiment_path
+                            / "plots"
+                            / f"eval_episode_{i+1}_test_ESN.png"
+                        )
+
                     if FLAGS.save_episode_data == True:
                         episode_dict = {
                             "true_state": true_state_arr,
@@ -2164,7 +2340,11 @@ def run_experiment(
             )
 
             print(
-                f"\n Evaluation, Episode={i+1}/{learn_episodes}, (ENV) Return = {eval_ave_return_env}, (MODEL) Return = {eval_ave_return_model}, (ENV) Last Reward ={eval_ave_last_reward_env}, (MODEL) Last Reward ={eval_ave_last_reward_model}  \n ",
+                f"\n Evaluation, Episode={i+1}/{learn_episodes}, (ENV) Return = {eval_ave_return_env}, (MODEL) Return = {eval_ave_return_model}, (ENV) Last Reward ={eval_ave_last_reward_env}, (MODEL) Last Reward ={eval_ave_last_reward_model}",
+                flush=True,
+            )
+            print(
+                f"ESN Test error = {jnp.mean(test_error)}, Total Error = {jnp.mean(total_error)}, PH = {jnp.mean(PH)} time steps \n",
                 flush=True,
             )
 

@@ -235,7 +235,7 @@ def loop(
     error = np.mean(realisation_error)
     print("Run", run_idx, "error:", error)
     print("Error:", error)
-    print("\n")
+    print("\n", flush=True)
     return error
 
 

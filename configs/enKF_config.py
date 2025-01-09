@@ -45,5 +45,5 @@ def get_config():
     config.enKF.observation_starts = 100
     config.enKF.wait_steps = 10
     config.enKF.use_reward = "model"
-    config.enKF.inflation_factor = 1.05
+    config.enKF.inflation_factor = 1.0
     return config

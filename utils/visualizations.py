@@ -389,3 +389,69 @@ def plot_episode(
     axs2[plot_dim - 1, 2].set_xlabel("t")
 
     return fig
+
+
+def plot_prediction(x, t, y, y_pred):
+    # set the colours
+    true_color = "black"
+    model_color = "red"
+
+    # initialize figure
+    fig = plt.figure(layout="constrained", figsize=(16, 10))
+    subfigs = fig.subfigures(2, 1, height_ratios=[0.5, 1.0])
+    axs0 = subfigs[0].subplots(1, 4)
+    axs1 = subfigs[1].subplots(3, 1)
+
+    # plot time series predictions
+    plt_idxs = [int(my_idx) for my_idx in y.shape[1] / 4 * jnp.arange(4)]
+    for k, plt_idx in enumerate(plt_idxs):
+        axs0[k].plot(t, y[:, plt_idx], color=true_color, label="True")
+        axs0[k].plot(t, y_pred[:, plt_idx], "--", color=model_color, label="Pred")
+        axs0[k].set_xlabel("t")
+        axs0[k].set_title(f"x = {x[plt_idx]:.2f}")
+        axs0[k].legend()
+    # plot flow field
+    max_y = jnp.max(y)
+    min_y = jnp.min(y)
+
+    im = axs1[0].imshow(
+        y.T,
+        vmax=max_y,
+        vmin=min_y,
+        extent=[0, len(y), x[0], x[-1]],
+        origin="lower",
+        aspect="auto",
+    )
+    axs1[0].set_xticklabels([])
+    axs1[0].set_ylabel("x")
+    cbar = fig.colorbar(im, ax=[axs1[0]], location="right")
+    cbar.ax.set_title("u")
+    axs1[0].set_title("True")
+
+    axs1[1].imshow(
+        y_pred.T,
+        vmax=max_y,
+        vmin=min_y,
+        extent=[0, len(y), x[0], x[-1]],
+        origin="lower",
+        aspect="auto",
+    )
+    axs1[1].set_xticklabels([])
+    axs1[1].set_ylabel("x")
+    cbar = fig.colorbar(im, ax=[axs1[1]], location="right")
+    cbar.ax.set_title("u")
+    axs1[1].set_title("Model prediction")
+
+    im = axs1[2].imshow(
+        jnp.abs(y.T - y_pred.T),
+        extent=[0, len(y), x[0], x[-1]],
+        origin="lower",
+        aspect="auto",
+        cmap="Reds",
+    )
+    axs1[2].set_xlabel("t")
+    axs1[2].set_ylabel("x")
+    cbar = fig.colorbar(im, ax=[axs1[2]], location="right")
+    axs1[2].set_title("|u - u_pred|")
+
+    return fig
