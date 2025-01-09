@@ -57,7 +57,7 @@ flags.DEFINE_bool(
 )
 flags.DEFINE_bool(
     "make_plots",
-    True,
+    False,
     "Use --make_plots to plot an episode and save it.",
 )
 _CONFIG = config_flags.DEFINE_config_file(
@@ -72,6 +72,7 @@ _ENV = config_flags.DEFINE_config_file(
 _ESN = config_flags.DEFINE_config_file(
     "esn_config", "configs/ESN_config.py", "Contains configs for the ESN."
 )
+_HYP = myflags.DEFINE_path("esn_hyp", None, "Contains hyperparameters for the ESN.")
 # flags.mark_flags_as_required(['config'])
 
 
@@ -934,35 +935,40 @@ def train_ESN(config, env, key):
     N_val = pp.get_steps(config.esn.val.fold_time, config.esn.model.network_dt)
     N_transient = 0
     error_measure = getattr(errors, config.esn.val.error_measure)
-    print("Starting validation.", flush=True)
-    min_dict = validate(
-        grid_range,
-        hyp_param_names,
-        hyp_param_scales,
-        n_calls=config.esn.val.n_calls,
-        n_initial_points=config.esn.val.n_initial_points,
-        ESN_dict=ESN_dict,
-        U_washout_train=DATA["u_washout"],
-        U_train=DATA["u"],
-        U_val=DATA["u"],
-        Y_train=DATA["y"],
-        Y_val=DATA["y"],
-        P_washout_train=DATA["p_washout"],
-        P_train=DATA["p"],
-        P_val=DATA["p"],
-        n_folds=config.esn.val.n_folds,
-        n_realisations=config.esn.val.n_realisations,
-        N_washout_steps=N_washout,
-        N_val_steps=N_val,
-        N_transient_steps=N_transient,
-        train_idx_list=train_idxs,
-        val_idx_list=val_idxs,
-        random_seed=config.esn.seed,
-        error_measure=error_measure,
-        network_dt=config.esn.model.network_dt,
-    )
-    # Save the hyperparameters
-    fp.write_h5(FLAGS.experiment_path / "esn_hyperparameters.h5", min_dict)
+    if config.esn.validate == True:
+        print("Starting validation.", flush=True)
+        min_dict = validate(
+            grid_range,
+            hyp_param_names,
+            hyp_param_scales,
+            n_calls=config.esn.val.n_calls,
+            n_initial_points=config.esn.val.n_initial_points,
+            ESN_dict=ESN_dict,
+            U_washout_train=DATA["u_washout"],
+            U_train=DATA["u"],
+            U_val=DATA["u"],
+            Y_train=DATA["y"],
+            Y_val=DATA["y"],
+            P_washout_train=DATA["p_washout"],
+            P_train=DATA["p"],
+            P_val=DATA["p"],
+            n_folds=config.esn.val.n_folds,
+            n_realisations=config.esn.val.n_realisations,
+            N_washout_steps=N_washout,
+            N_val_steps=N_val,
+            N_transient_steps=N_transient,
+            train_idx_list=train_idxs,
+            val_idx_list=val_idxs,
+            random_seed=config.esn.seed,
+            error_measure=error_measure,
+            network_dt=config.esn.model.network_dt,
+        )
+        # Save the hyperparameters
+        fp.write_h5(FLAGS.experiment_path / "esn_hyperparameters.h5", min_dict)
+    else:
+        print("Using the provided hyperparameters.", flush=True)
+        min_dict = fp.read_h5(FLAGS.esn_hyp)
+        print(min_dict)
 
     print("Train JAX ESN with the same hyperparameters.", flush=True)
     hyp_params = []

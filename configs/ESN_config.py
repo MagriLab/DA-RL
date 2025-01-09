@@ -30,6 +30,8 @@ def get_config():
     config.tikhonov = 1e-7
 
     # validation configuration
+    config.validate = False
+
     config.val = ml_collections.ConfigDict()
 
     config.val.fold_time = 25
