@@ -30,7 +30,7 @@ def get_config():
     config.tikhonov = 1e-7
 
     # validation configuration
-    config.validate = False
+    config.validate = True
 
     config.val = ml_collections.ConfigDict()
 
