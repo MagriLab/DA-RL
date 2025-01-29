@@ -1180,7 +1180,9 @@ def main(_):
     # initialize wandb logging
     config.experiment = "ddpg"
     if FLAGS.log_wandb:
-        wandb_run = wandb.init(config=config.to_dict(), **wandb_config)
+        cfg_dict=config.to_dict()
+        cfg_dict["local_path"] = FLAGS.experiment_path.name
+        wandb_run = wandb.init(config=cfg_dict, **wandb_config)
     else:
         wandb_run = None
 
