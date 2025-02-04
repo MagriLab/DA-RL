@@ -64,6 +64,8 @@ _ENV = config_flags.DEFINE_config_file(
 
 # flags.mark_flags_as_required(['config'])
 
+NOISE_DICT = {"0.08": 1.15, "0.05": 1.29, "0.03": 1.33}
+
 
 def log_metrics_wandb(wandb_run, metrics, step=None):
     wandb_run.log(data=metrics, step=step)
@@ -438,6 +440,15 @@ def run_experiment(
     )
     get_model_reward = jax.jit(get_model_reward)
 
+    if config.enKF.cov_type == "const":
+        get_cov = partial(
+            cov.get_const, std=NOISE_DICT[f"{env.nu}"] * config.enKF.std_obs
+        )
+    elif config.enKF.cov_type == "max":
+        get_cov = partial(cov.get_max, std=config.enKF.std_obs)
+    elif config.enKF.cov_type == "prop":
+        get_cov = partial(cov.get_prop, std=config.enKF.std_obs)
+
     def until_first_observation(true_state, true_obs, state_ens, observation_starts):
         def body_fun(carry, _):
             true_state, true_obs, state_ens = carry
@@ -522,7 +533,7 @@ def run_experiment(
             # we got an observation
             # define observation covariance matrix
             true_state, true_obs, state_ens, key_obs = carry
-            obs_cov = cov.get_max(std=config.enKF.std_obs, y=true_obs)
+            obs_cov = get_cov(y=true_obs)
 
             # add noise on the observation
             key_obs, key_enKF = jax.random.split(key_obs)
@@ -629,7 +640,7 @@ def run_experiment(
             # we got an observation
             # define observation covariance matrix
             true_state, true_obs, state_ens, key_obs, key_action, replay_buffer = carry
-            obs_cov = cov.get_max(std=config.enKF.std_obs, y=true_obs)
+            obs_cov = get_cov(y=true_obs)
 
             # add noise on the observation
             key_obs, key_enKF = jax.random.split(key_obs)
@@ -814,7 +825,7 @@ def run_experiment(
                 actor_state,
                 critic_state,
             ) = carry
-            obs_cov = cov.get_max(std=config.enKF.std_obs, y=true_obs)
+            obs_cov = get_cov(y=true_obs)
 
             # add noise on the observation
             key_obs, key_enKF = jax.random.split(key_obs)
@@ -1662,7 +1673,7 @@ def main(_):
     # initialize wandb logging
     config.experiment = "ddpg_with_enkf"
     if FLAGS.log_wandb:
-        cfg_dict=config.to_dict()
+        cfg_dict = config.to_dict()
         cfg_dict["local_path"] = FLAGS.experiment_path.name
         wandb_run = wandb.init(config=cfg_dict, **FLAGS.wandb_config)
     else:

@@ -75,6 +75,8 @@ _ESN = config_flags.DEFINE_config_file(
 _HYP = myflags.DEFINE_path("esn_hyp", None, "Contains hyperparameters for the ESN.")
 # flags.mark_flags_as_required(['config'])
 
+NOISE_DICT = {"0.08": 1.15, "0.05": 1.29, "0.03": 1.33}
+
 
 def log_metrics_wandb(wandb_run, metrics, step=None):
     wandb_run.log(data=metrics, step=step)
@@ -397,12 +399,20 @@ def apply_enKF(m, Af, d, Cdd, M, my_ESN, before_EnKF, after_EnKF, key, rho=1.0):
     # before the readout because we need our observation matrix to be linear
     # if we're using r2 mode then the EnKF is applied on the r2 state
     # without the output bias because we apply EnKF on the r/r2 state and bias is constant
-    Af_full = before_EnKF(Af)
+    # Af_full = before_EnKF(Af)
 
+    # # remove the bias from the data
+    # Aa_full = EnKF(m, Af_full, d - my_ESN.observation_bias, Cdd, M, key)
+
+    # Aa = after_EnKF(Aa_full, Af)
+
+    Af2 = before_EnKF(Af)
+    M_Af2 = M @ Af2
+    Af_full = jnp.vstack([Af, M_Af2])
+    M_new = jnp.hstack([jnp.zeros_like(M), jnp.eye(M.shape[0])])
     # remove the bias from the data
-    Aa_full = EnKF(m, Af_full, d - my_ESN.observation_bias, Cdd, M, key)
-
-    Aa = after_EnKF(Aa_full, Af)
+    Aa_full = EnKF(m, Af_full, d - my_ESN.observation_bias, Cdd, M_new, key)
+    Aa = Aa_full[: my_ESN.N_reservoir, :]
 
     # inflate analysed state ensemble
     # helps with the collapse of variance when using small ensemble
@@ -456,6 +466,15 @@ def generate_training_episode(config, env, episode_type="null_action"):
     )
     env_sample_action = jax.jit(env_sample_action)
 
+    if config.enKF.cov_type == "const":
+        get_cov = partial(
+            cov.get_const, std=NOISE_DICT[f"{env.nu}"] * config.enKF.std_obs
+        )
+    elif config.enKF.cov_type == "max":
+        get_cov = partial(cov.get_max, std=config.enKF.std_obs)
+    elif config.enKF.cov_type == "prop":
+        get_cov = partial(cov.get_prop, std=config.enKF.std_obs)
+
     def null_action_observe(
         true_state,
         true_obs,
@@ -487,7 +506,7 @@ def generate_training_episode(config, env, episode_type="null_action"):
             # define observation covariance matrix
             true_state, true_obs, key_obs = carry
 
-            obs_cov = cov.get_max(std=config.enKF.std_obs, y=true_obs)
+            obs_cov = get_cov(y=true_obs)
 
             # add noise on the observation
             key_obs, _ = jax.random.split(key_obs)
@@ -560,7 +579,7 @@ def generate_training_episode(config, env, episode_type="null_action"):
             key_action, _ = jax.random.split(key_action)
             action = env_sample_action(key=key_action)
 
-            obs_cov = cov.get_max(std=config.enKF.std_obs, y=true_obs)
+            obs_cov = get_cov(y=true_obs)
 
             # add noise on the observation
             key_obs, _ = jax.random.split(key_obs)
@@ -1194,6 +1213,15 @@ def run_experiment(
     )
     model_ensemble_to_state = jax.jit(model_ensemble_to_state)
 
+    if config.enKF.cov_type == "const":
+        get_cov = partial(
+            cov.get_const, std=NOISE_DICT[f"{env.nu}"] * config.enKF.std_obs
+        )
+    elif config.enKF.cov_type == "max":
+        get_cov = partial(cov.get_max, std=config.enKF.std_obs)
+    elif config.enKF.cov_type == "prop":
+        get_cov = partial(cov.get_prop, std=config.enKF.std_obs)
+
     def until_first_observation(true_state, true_obs, state_ens, observation_starts):
         def body_fun(carry, _):
             true_state, true_obs, state_ens = carry
@@ -1278,7 +1306,7 @@ def run_experiment(
             # we got an observation
             # define observation covariance matrix
             true_state, true_obs, state_ens, key_obs = carry
-            obs_cov = cov.get_max(std=config.enKF.std_obs, y=true_obs)
+            obs_cov = get_cov(y=true_obs)
 
             # add noise on the observation
             key_obs, key_enKF = jax.random.split(key_obs)
@@ -1385,7 +1413,7 @@ def run_experiment(
             # we got an observation
             # define observation covariance matrix
             true_state, true_obs, state_ens, key_obs, key_action, replay_buffer = carry
-            obs_cov = cov.get_max(std=config.enKF.std_obs, y=true_obs)
+            obs_cov = get_cov(y=true_obs)
 
             # add noise on the observation
             key_obs, key_enKF = jax.random.split(key_obs)
@@ -1570,7 +1598,7 @@ def run_experiment(
                 actor_state,
                 critic_state,
             ) = carry
-            obs_cov = cov.get_max(std=config.enKF.std_obs, y=true_obs)
+            obs_cov = get_cov(y=true_obs)
 
             # add noise on the observation
             key_obs, key_enKF = jax.random.split(key_obs)
@@ -2495,7 +2523,7 @@ def main(_):
     # initialize wandb logging
     config.experiment = "ddpg_with_enkf_esn"
     if FLAGS.log_wandb:
-        cfg_dict=config.to_dict()
+        cfg_dict = config.to_dict()
         cfg_dict["local_path"] = FLAGS.experiment_path.name
         wandb_run = wandb.init(config=cfg_dict, **FLAGS.wandb_config)
     else:

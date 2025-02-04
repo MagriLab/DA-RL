@@ -63,6 +63,8 @@ _ENV = config_flags.DEFINE_config_file(
 
 # flags.mark_flags_as_required(['config'])
 
+NOISE_DICT = {"0.08": 1.15, "0.05": 1.29, "0.03": 1.33}
+
 
 def log_metrics_wandb(wandb_run, metrics, step=None):
     wandb_run.log(data=metrics, step=step)
@@ -240,6 +242,15 @@ def run_experiment(config, env, agent, wandb_run=None, logs=None, checkpoint_dir
     )
     env_sample_action = jax.jit(env_sample_action)
 
+    if config.enKF.cov_type == "const":
+        get_cov = partial(
+            cov.get_const, std=NOISE_DICT[f"{env.nu}"] * config.enKF.std_obs
+        )
+    elif config.enKF.cov_type == "max":
+        get_cov = partial(cov.get_max, std=config.enKF.std_obs)
+    elif config.enKF.cov_type == "prop":
+        get_cov = partial(cov.get_prop, std=config.enKF.std_obs)
+
     def until_first_observation(true_state, true_obs, observation_starts):
         def body_fun(carry, _):
             true_state, true_obs = carry
@@ -290,7 +301,7 @@ def run_experiment(config, env, agent, wandb_run=None, logs=None, checkpoint_dir
             # we got an observation
             # define observation covariance matrix
             true_state, true_obs, key_obs = carry
-            obs_cov = cov.get_max(std=config.enKF.std_obs, y=true_obs)
+            obs_cov = get_cov(y=true_obs)
 
             # add noise on the observation
             key_obs, _ = jax.random.split(key_obs)
@@ -385,7 +396,7 @@ def run_experiment(config, env, agent, wandb_run=None, logs=None, checkpoint_dir
                 jnp.arange(wait_steps),
             )
 
-            obs_cov = cov.get_max(std=config.enKF.std_obs, y=next_true_obs)
+            obs_cov = get_cov(y=true_obs)
 
             # add noise on the observation
             key_obs, _ = jax.random.split(key_obs)
@@ -498,7 +509,7 @@ def run_experiment(config, env, agent, wandb_run=None, logs=None, checkpoint_dir
             )
 
             # define observation covariance matrix
-            obs_cov = cov.get_max(std=config.enKF.std_obs, y=next_true_obs)
+            obs_cov = get_cov(y=true_obs)
 
             # add noise on the observation
             key_obs, _ = jax.random.split(key_obs)
@@ -720,7 +731,7 @@ def run_experiment(config, env, agent, wandb_run=None, logs=None, checkpoint_dir
             action_arr0,
             reward_arr0,
         ) = until_first_observation(true_state=init_true_state, true_obs=init_true_obs)
-        obs_cov = cov.get_max(std=config.enKF.std_obs, y=true_obs)
+        obs_cov = get_cov(y=true_obs)
 
         # add noise on the observation
         key_obs, _ = jax.random.split(key_obs)
@@ -807,8 +818,7 @@ def run_experiment(config, env, agent, wandb_run=None, logs=None, checkpoint_dir
             action_arr0,
             reward_arr0,
         ) = until_first_observation(true_state=init_true_state, true_obs=init_true_obs)
-
-        obs_cov = cov.get_max(std=config.enKF.std_obs, y=true_obs)
+        obs_cov = get_cov(y=true_obs)
 
         # add noise on the observation
         key_obs, _ = jax.random.split(key_obs)
@@ -1024,7 +1034,9 @@ def run_experiment(config, env, agent, wandb_run=None, logs=None, checkpoint_dir
                     key_env,
                     key_obs,
                 ) = act_episode(key_env, key_obs, actor_state.params)
-                eval_ave_return += jnp.sum(reward_arr[config.enKF.observation_starts + 1 :])
+                eval_ave_return += jnp.sum(
+                    reward_arr[config.enKF.observation_starts + 1 :]
+                )
                 eval_ave_reward += jnp.mean(
                     reward_arr[config.enKF.observation_starts + 1 :]
                 )
@@ -1088,7 +1100,9 @@ def run_experiment(config, env, agent, wandb_run=None, logs=None, checkpoint_dir
                 key_env,
                 key_obs,
             ) = act_episode(key_env, key_obs, actor_state.params)
-            final_eval_return = jnp.sum(reward_arr[config.enKF.observation_starts + 1 :])
+            final_eval_return = jnp.sum(
+                reward_arr[config.enKF.observation_starts + 1 :]
+            )
             final_eval_ave_reward = jnp.mean(
                 reward_arr[config.enKF.observation_starts + 1 :]
             )
@@ -1180,7 +1194,7 @@ def main(_):
     # initialize wandb logging
     config.experiment = "ddpg"
     if FLAGS.log_wandb:
-        cfg_dict=config.to_dict()
+        cfg_dict = config.to_dict()
         cfg_dict["local_path"] = FLAGS.experiment_path.name
         wandb_run = wandb.init(config=cfg_dict, **wandb_config)
     else:
