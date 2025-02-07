@@ -456,72 +456,21 @@ def run_experiment(config, env, agent, wandb_run=None, logs=None, checkpoint_dir
         critic_state,
     ):
         def forecast_fun(carry, _):
-            true_state, true_obs, action = carry
+            (
+                true_state,
+                true_obs,
+                action,
+                replay_buffer,
+                actor_state,
+                critic_state,
+            ) = carry
 
             # get the next observation and reward with this action
             true_state, true_obs, reward, terminated, _, _ = env_step(
                 state=true_state, action=action
             )
 
-            return (true_state, true_obs, action), (
-                true_state,
-                true_obs,
-                action,
-                reward,
-                terminated,
-            )
-
-        def body_fun(carry, _):
-            # observe
-            # we got an observation
-            (
-                true_state,
-                true_obs,
-                obs,
-                key_obs,
-                key_action,
-                replay_buffer,
-                actor_state,
-                critic_state,
-            ) = carry
-            # get action from the learning actor network
-            action = agent.actor.apply(actor_state.params, obs)
-
-            # add exploration noise on the action
-            # original paper adds Ornstein-Uhlenbeck process noise
-            # but in other papers this is deemed unnecessary
-            key_action, _ = jax.random.split(key_action)
-            action = add_gaussian_noise(key_action, action, stddev=exploration_stddev)
-            # clip the action so that it obeys the limits set by the environment
-            action = jnp.clip(action, a_min=env.action_low, a_max=env.action_high)
-
-            # propagate environment with the given action
-            (next_true_state, next_true_obs, action), (
-                true_state_arr,
-                true_obs_arr,
-                action_arr,
-                reward_arr,
-                terminated_arr,
-            ) = jax.lax.scan(
-                forecast_fun,
-                (true_state, true_obs, action),
-                jnp.arange(wait_steps),
-            )
-
-            # define observation covariance matrix
-            obs_cov = get_cov(y=true_obs)
-
-            # add noise on the observation
-            key_obs, _ = jax.random.split(key_obs)
-            next_obs = jax.random.multivariate_normal(
-                key_obs, next_true_obs, obs_cov, method="svd"
-            )
-
-            # add
-            replay_buffer = add_experience(
-                replay_buffer, obs, action, reward_arr[-1], next_obs, terminated_arr[-1]
-            )
-
+            # sample
             sampled, replay_buffer = sample_experiences(
                 replay_buffer, config.train.batch_size
             )
@@ -548,6 +497,82 @@ def run_experiment(config, env, agent, wandb_run=None, logs=None, checkpoint_dir
             actor_state, critic_state = agent.update_target_networks(
                 actor_state, critic_state
             )
+
+            return (
+                true_state,
+                true_obs,
+                action,
+                replay_buffer,
+                actor_state,
+                critic_state,
+            ), (true_state, true_obs, action, reward, terminated, q_loss, policy_loss)
+
+        def body_fun(carry, _):
+            # observe
+            # we got an observation
+            (
+                true_state,
+                true_obs,
+                obs,
+                key_obs,
+                key_action,
+                replay_buffer,
+                actor_state,
+                critic_state,
+            ) = carry
+            # get action from the learning actor network
+            action = agent.actor.apply(actor_state.params, obs)
+
+            # add exploration noise on the action
+            # original paper adds Ornstein-Uhlenbeck process noise
+            # but in other papers this is deemed unnecessary
+            key_action, _ = jax.random.split(key_action)
+            action = add_gaussian_noise(key_action, action, stddev=exploration_stddev)
+            # clip the action so that it obeys the limits set by the environment
+            action = jnp.clip(action, a_min=env.action_low, a_max=env.action_high)
+
+            # propagate environment with the given action
+            (
+                next_true_state,
+                next_true_obs,
+                action,
+                replay_buffer,
+                actor_state,
+                critic_state,
+            ), (
+                true_state_arr,
+                true_obs_arr,
+                action_arr,
+                reward_arr,
+                terminated_arr,
+                q_loss_arr,
+                policy_loss_arr,
+            ) = jax.lax.scan(
+                forecast_fun,
+                (
+                    true_state,
+                    true_obs,
+                    action,
+                    replay_buffer,
+                    actor_state,
+                    critic_state,
+                ),
+                jnp.arange(wait_steps),
+            )
+
+            # define observation covariance matrix
+            obs_cov = get_cov(y=true_obs)
+
+            # add noise on the observation
+            key_obs, _ = jax.random.split(key_obs)
+            next_obs = jax.random.multivariate_normal(
+                key_obs, next_true_obs, obs_cov, method="svd"
+            )
+
+            # add
+            replay_buffer = add_experience(
+                replay_buffer, obs, action, reward_arr[-1], next_obs, terminated_arr[-1]
+            )
             return (
                 next_true_state,
                 next_true_obs,
@@ -563,8 +588,8 @@ def run_experiment(config, env, agent, wandb_run=None, logs=None, checkpoint_dir
                 next_obs,
                 action_arr,
                 reward_arr,
-                q_loss,
-                policy_loss,
+                q_loss_arr,
+                policy_loss_arr,
             )
 
         n_loops = episode_steps // wait_steps
@@ -869,9 +894,20 @@ def run_experiment(config, env, agent, wandb_run=None, logs=None, checkpoint_dir
             action_arr,
             (action_arr.shape[0] * action_arr.shape[1], action_arr.shape[2]),
         )
+
         reward_arr = jnp.reshape(
             reward_arr,
             (reward_arr.shape[0] * reward_arr.shape[1],),
+        )
+
+        q_loss_arr = jnp.reshape(
+            q_loss_arr,
+            (q_loss_arr.shape[0] * q_loss_arr.shape[1],),
+        )
+
+        policy_loss_arr = jnp.reshape(
+            policy_loss_arr,
+            (policy_loss_arr.shape[0] * policy_loss_arr.shape[1],),
         )
 
         stack = lambda a, b, c: jnp.vstack((jnp.expand_dims(a, axis=0), b, c))
