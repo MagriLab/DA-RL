@@ -296,7 +296,8 @@ def get_observation_matrix(my_ESN, observation_indices):
     M = M.at[jnp.arange(len(observation_indices)), observation_indices].set(1)
 
     # Multiply with the transposed output weight matrix and return
-    return M @ my_ESN.output_weights[: -len(my_ESN.output_bias)].T
+    # return M @ my_ESN.output_weights[: -len(my_ESN.output_bias)].T
+    return M @ my_ESN.output_weights.T
 
 
 def ensemble_to_state(state_ens, my_ESN, before_readout):
@@ -374,46 +375,60 @@ def inflate_ensemble(A, rho):
     return A_m + rho * (A - A_m)
 
 
-def before_EnKF_r1(x):
-    return x
+# def before_EnKF_r1(x):
+#     return x
 
 
-def before_EnKF_r2(x):
-    # go to r2 mode
-    x2 = x.at[1::2].set(x[1::2] ** 2)
-    return x2
+# def before_EnKF_r2(x):
+#     # go to r2 mode
+#     x2 = x.at[1::2].set(x[1::2] ** 2)
+#     return x2
 
 
-def after_EnKF_r1(x):
-    return x
+# def after_EnKF_r1(x):
+#     return x
 
 
-def after_EnKF_r2(x, y):
-    # to go back to r from r2 mode
-    x2 = x.at[1::2].set(jnp.sign(y[1::2]) * jnp.sqrt(jnp.maximum(x[1::2], 0)))
-    return x2
+# def after_EnKF_r2(x, y):
+#     # to go back to r from r2 mode
+#     x2 = x.at[1::2].set(jnp.sign(y[1::2]) * jnp.sqrt(jnp.maximum(x[1::2], 0)))
+#     return x2
 
 
-def apply_enKF(m, Af, d, Cdd, M, my_ESN, before_EnKF, after_EnKF, key, rho=1.0):
+def apply_enKF(m, Af, d, Cdd, M, my_ESN, before_readout, key, rho=1.0):
+    # NONLINEAR METHOD
     # get the reservoir state before readout
     # before the readout because we need our observation matrix to be linear
     # if we're using r2 mode then the EnKF is applied on the r2 state
     # without the output bias because we apply EnKF on the r/r2 state and bias is constant
     # Af_full = before_EnKF(Af)
 
-    # # remove the bias from the data
+    # # remove the bias from the data, if using this M should exclude the output bias!!
     # Aa_full = EnKF(m, Af_full, d - my_ESN.observation_bias, Cdd, M, key)
 
     # Aa = after_EnKF(Aa_full, Af)
 
-    Af2 = before_EnKF(Af)
+    # Af2 = before_EnKF(Af)
+
+    # STATE AUGMENTATION METHOD
+    # Vectorize the before_readout function for the ensemble
+    before_readout_ensemble = jax.vmap(before_readout, in_axes=(1, None), out_axes=1)
+
+    # Apply the vectorized before_readout function to the ensemble Af
+    Af2 = before_readout_ensemble(Af, my_ESN.output_bias)
     M_Af2 = M @ Af2
+
+    # concatenate with observations to avoid nonlinear observation operator
+    # the end result is equivalent to 
+    # psi_a = psi_f + [C_psi_m(psi); C_m(psi)_m(psi)] @ (C_dd +  C_m(psi)_m(psi))^-1
     Af_full = jnp.vstack([Af, M_Af2])
-    M_new = jnp.hstack([jnp.zeros_like(M), jnp.eye(M.shape[0])])
-    # remove the bias from the data
-    Aa_full = EnKF(m, Af_full, d - my_ESN.observation_bias, Cdd, M_new, key)
+    M_new = jnp.hstack([jnp.zeros((M.shape[0],Af.shape[0])), jnp.eye(M.shape[0])])
+    # don't need to remove the bias from the data because it's part of the mean
+    # it doesn't affect the covariance of M(Af)
+    Aa_full = EnKF(m, Af_full, d, Cdd, M_new, key)
     Aa = Aa_full[: my_ESN.N_reservoir, :]
 
+    # INFLATION
     # inflate analysed state ensemble
     # helps with the collapse of variance when using small ensemble
     Aa = inflate_ensemble(Aa, rho)
@@ -1187,15 +1202,14 @@ def run_experiment(
     )
     model_forecast = jax.jit(model_forecast)
 
-    before_EnKF = before_EnKF_r2 if model.r2_mode == True else jesn.before_EnKF_r1
-    after_EnKF = after_EnKF_r2 if model.r2_mode == True else jesn.after_EnKF_r1
+    # before_EnKF = before_EnKF_r2 if model.r2_mode == True else jesn.before_EnKF_r1
+    # after_EnKF = after_EnKF_r2 if model.r2_mode == True else jesn.after_EnKF_r1
     model_apply_enKF = partial(
         apply_enKF,
         m=config.enKF.m,
         M=obs_mat,
         my_ESN=model,
-        before_EnKF=before_EnKF,
-        after_EnKF=after_EnKF,
+        before_readout=before_readout,
         rho=config.enKF.inflation_factor,
     )
     model_apply_enKF = jax.jit(model_apply_enKF)

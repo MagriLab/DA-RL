@@ -125,7 +125,7 @@ def grouped_sparse(W_in_shape, W_in_seed):
 
     W_in = jnp.zeros(W_in_shape)
     key = jax.random.PRNGKey(W_in_seed)
-    rnd0 = jax.random.split(key, 1)
+    rnd0, _ = jax.random.split(key)
 
     # Generate row and column indices
     row_idx = jnp.arange(0, W_in.shape[0])

@@ -22,8 +22,8 @@ def get_config():
     config.esn = ml_collections.ConfigDict()
 
     config.network = ml_collections.ConfigDict()
-    config.network.actor_hidden_units = [256, 256]
-    config.network.critic_hidden_units = [256, 256]
+    config.network.actor_hidden_units = [256,256]
+    config.network.critic_hidden_units = [256,256]
     config.network.activation_function = "relu"
 
     config.train = ml_collections.ConfigDict()
@@ -38,12 +38,13 @@ def get_config():
     config.replay_buffer.capacity = 100000
 
     config.enKF = ml_collections.ConfigDict()
-    config.enKF.std_init = 0.2
-    config.enKF.m = 50
-    config.enKF.std_obs = 0.2
-    config.enKF.low_order_N = 20
-    config.enKF.observation_starts = 100
-    config.enKF.wait_steps = 100
-    config.enKF.use_reward = "model"
+    config.enKF.std_init = 0.0
+    config.enKF.m = 0
+    config.enKF.std_obs = 0.0
+    config.enKF.cov_type = "const" # "const", "max", "prop"
+    config.enKF.low_order_N = 64
+    config.enKF.observation_starts = 0
+    config.enKF.wait_steps = 50
+    config.enKF.use_reward = "env"
     config.enKF.inflation_factor = 1.0
     return config
