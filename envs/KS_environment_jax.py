@@ -4,7 +4,9 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 import jax.random as random
 from jax import jit, lax
-from jax.scipy.optimize import minimize
+from scipy.optimize import minimize 
+# jax scipy.optimize.minimize doesn't converge!! 
+# alternative is to do gradient descent with optax
 
 from envs.KS_solver_jax import KS  # Import the KS solver
 from functools import partial
@@ -124,7 +126,7 @@ class KSenv:
                                       lin = lin, 
                                       ik = ik, 
                                       dt = dt)
-        result = minimize(partial_fixed_point(u0))
+        result = minimize(partial_fixed_point, u0, method="BFGS")
         return result.x
 
     @staticmethod

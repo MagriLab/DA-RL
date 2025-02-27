@@ -10,7 +10,7 @@ def get_config():
     config.actuator_loss_weight = 0.2
     config.burn_in = 1000
     config.actuator_locs = ((2 * np.pi) / 8) * np.arange(8)
-    config.sensor_locs = ((2 * np.pi) / 64) * np.arange(64)
+    config.sensor_locs = ((2 * np.pi) / 4) * np.arange(4)
     config.target = "e0"
     config.frame_skip = 1
     return config
