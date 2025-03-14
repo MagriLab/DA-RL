@@ -68,6 +68,7 @@ class ESN:
 
         # Biases
         self.input_bias = input_bias
+        self.input_bias_len = len(input_bias)
         self.output_bias = output_bias
 
         # Input normalization
@@ -92,7 +93,7 @@ class ESN:
         self.W_in_seed = input_seed
         self.W_in_shape = (
             self.N_reservoir,
-            self.N_dim + len(self.input_bias) + self.N_param_dim,
+            self.N_dim + self.N_param_dim + self.input_bias_len,
         )
         # N_dim+length of input bias because we augment the inputs with a bias
         # if no bias, then this will be + 0
@@ -226,23 +227,18 @@ class ESN:
         """
         if hasattr(self, "sigma_in"):
             # rescale the input matrix
-            if self.N_param_dim > 0:
-                self.W_in = self.W_in.at[:, : -self.N_param_dim].set(
-                    (1 / self.sigma_in) * self.W_in[:, : -self.N_param_dim]
-                )
-            else:
-                self.W_in = (1 / self.sigma_in) * self.W_in
+            self.W_in = self.W_in.at[:, : self.N_dim].set(
+                (1 / self.sigma_in) * self.W_in[:, : self.N_dim]
+            )
 
         # set input scaling
         self.sigma_in = new_input_scaling
         if self.verbose:
             print("Input weights are rescaled with the new input scaling.")
-        if self.N_param_dim > 0:
-            self.W_in = self.W_in.at[:, : -self.N_param_dim].set(
-                self.sigma_in * self.W_in[:, : -self.N_param_dim]
-            )
-        else:
-            self.W_in = self.sigma_in * self.W_in
+
+        self.W_in = self.W_in.at[:, : self.N_dim].set(
+            self.sigma_in * self.W_in[:, : self.N_dim]
+        )
         return
 
     @property
@@ -355,22 +351,24 @@ class ESN:
 
     def generate_input_weights(self):
         if self.input_weights_mode == "random_sparse":
-            return generate_input_weights.random_sparse(self.W_in_shape, self.W_in_seed)
+            return generate_input_weights.random_sparse(
+                self.W_in_shape, self.W_in_seed, self.input_bias_len
+            )
         elif self.input_weights_mode == "random_sparse_input_sparse_param":
             return generate_input_weights.random_sparse_input_sparse_param(
-                self.W_in_shape, self.N_param_dim, self.W_in_seed
+                self.W_in_shape, self.N_param_dim, self.W_in_seed, self.input_bias_len
             )
         elif self.input_weights_mode == "random_sparse_input_dense_param":
             return generate_input_weights.random_sparse_input_dense_param(
-                self.W_in_shape, self.N_param_dim, self.W_in_seed
+                self.W_in_shape, self.N_param_dim, self.W_in_seed, self.input_bias_len
             )
         elif self.input_weights_mode == "grouped_sparse":
             return generate_input_weights.grouped_sparse(
-                self.W_in_shape, self.W_in_seed
+                self.W_in_shape, self.W_in_seed, self.input_bias_len
             )
         elif self.input_weights_mode == "grouped_sparse_input_dense_param":
             return generate_input_weights.grouped_sparse_input_dense_param(
-                self.W_in_shape, self.N_param_dim, self.W_in_seed
+                self.W_in_shape, self.N_param_dim, self.W_in_seed, self.input_bias_len
             )
         elif self.input_weights_mode == "dense":
             return generate_input_weights.dense(self.W_in_shape, self.W_in_seed)
@@ -410,12 +408,13 @@ def step(params, x_prev, u, p):
     # we normalize here, so that the input is normalised
     # in closed-loop run too
 
-    # augment the input with the input bias
-    u_augmented = jnp.hstack((u_norm, params.b_in))
-
     # augment the input with the parameters
     # avoid using if statements
-    u_augmented = jnp.hstack((u_augmented, (p - params.norm_p[0]) * params.norm_p[1]))
+    p_norm = (p[: params.N_param_dim] - params.norm_p[0]) * params.norm_p[1]
+    u_augmented = jnp.hstack((u_norm, p_norm))
+
+    # augment the input with the input bias
+    u_augmented = jnp.hstack((u_augmented, params.b_in))
 
     # update the reservoir
     x_tilde = jnp.tanh(jnp.dot(params.W_in, u_augmented) + jnp.dot(params.W, x_prev))

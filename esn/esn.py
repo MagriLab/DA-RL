@@ -72,6 +72,7 @@ class ESN:
 
         ## Biases
         self.input_bias = input_bias
+        self.input_bias_len = len(input_bias)
         self.output_bias = output_bias
 
         ## Input normalization
@@ -95,7 +96,7 @@ class ESN:
         self.W_in_seeds = input_seeds
         self.W_in_shape = (
             self.N_reservoir,
-            self.N_dim + len(self.input_bias) + self.N_param_dim,
+            self.N_dim + self.N_param_dim + self.input_bias_len,
         )
         # N_dim+length of input bias because we augment the inputs with a bias
         # if no bias, then this will be + 0
@@ -227,23 +228,15 @@ class ESN:
         """
         if hasattr(self, "sigma_in"):
             # rescale the input matrix
-            if self.N_param_dim > 0:
-                self.W_in[:, : -self.N_param_dim] = (1 / self.sigma_in) * self.W_in[
-                    :, : -self.N_param_dim
-                ]
-            else:
-                self.W_in = (1 / self.sigma_in) * self.W_in
+            self.W_in[:, : self.N_dim] = (1 / self.sigma_in) * self.W_in[
+                :, : self.N_dim
+            ]
 
         # set input scaling
         self.sigma_in = new_input_scaling
         if self.verbose:
             print("Input weights are rescaled with the new input scaling.")
-        if self.N_param_dim > 0:
-            self.W_in[:, : -self.N_param_dim] = (
-                self.sigma_in * self.W_in[:, : -self.N_param_dim]
-            )
-        else:
-            self.W_in = self.sigma_in * self.W_in
+        self.W_in[:, : self.N_dim] = self.sigma_in * self.W_in[:, : self.N_dim]
         return
 
     @property
@@ -353,23 +346,23 @@ class ESN:
     def generate_input_weights(self):
         if self.input_weights_mode == "random_sparse":
             return generate_input_weights.random_sparse(
-                self.W_in_shape, self.W_in_seeds
+                self.W_in_shape, self.W_in_seeds, self.input_bias_len
             )
         elif self.input_weights_mode == "random_sparse_input_sparse_param":
             return generate_input_weights.random_sparse_input_sparse_param(
-                self.W_in_shape, self.N_param_dim, self.W_in_seeds
+                self.W_in_shape, self.N_param_dim, self.W_in_seeds, self.input_bias_len
             )
         elif self.input_weights_mode == "random_sparse_input_dense_param":
             return generate_input_weights.random_sparse_input_dense_param(
-                self.W_in_shape, self.N_param_dim, self.W_in_seeds
+                self.W_in_shape, self.N_param_dim, self.W_in_seeds, self.input_bias_len
             )
         elif self.input_weights_mode == "grouped_sparse":
             return generate_input_weights.grouped_sparse(
-                self.W_in_shape, self.W_in_seeds
+                self.W_in_shape, self.W_in_seeds, self.input_bias_len
             )
         elif self.input_weights_mode == "grouped_sparse_input_dense_param":
             return generate_input_weights.grouped_sparse_input_dense_param(
-                self.W_in_shape, self.N_param_dim, self.W_in_seeds
+                self.W_in_shape, self.N_param_dim, self.W_in_seeds, self.input_bias_len
             )
         elif self.input_weights_mode == "dense":
             return generate_input_weights.dense(self.W_in_shape, self.W_in_seeds)
@@ -403,13 +396,15 @@ class ESN:
         # in closed-loop run too?
 
         # augment the input with the input bias
-        u_augmented = np.hstack((u_norm, self.b_in))
+        u_augmented = u_norm
 
         # augment the input with the parameters
         if self.N_param_dim > 0:
             u_augmented = np.hstack(
                 (u_augmented, (p - self.norm_p[0]) * self.norm_p[1])
             )
+
+        u_augmented = np.hstack((u_augmented, self.b_in))
 
         # update the reservoir
         if self.input_only_mode:

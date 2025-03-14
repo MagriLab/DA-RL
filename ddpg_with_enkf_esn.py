@@ -419,10 +419,10 @@ def apply_enKF(m, Af, d, Cdd, M, my_ESN, before_readout, key, rho=1.0):
     M_Af2 = M @ Af2
 
     # concatenate with observations to avoid nonlinear observation operator
-    # the end result is equivalent to 
+    # the end result is equivalent to
     # psi_a = psi_f + [C_psi_m(psi); C_m(psi)_m(psi)] @ (C_dd +  C_m(psi)_m(psi))^-1
     Af_full = jnp.vstack([Af, M_Af2])
-    M_new = jnp.hstack([jnp.zeros((M.shape[0],Af.shape[0])), jnp.eye(M.shape[0])])
+    M_new = jnp.hstack([jnp.zeros((M.shape[0], Af.shape[0])), jnp.eye(M.shape[0])])
     # don't need to remove the bias from the data because it's part of the mean
     # it doesn't affect the covariance of M(Af)
     Aa_full = EnKF(m, Af_full, d, Cdd, M_new, key)
@@ -964,6 +964,8 @@ def train_ESN(config, env, key):
         ESN_dict["output_bias"] = np.array(
             [1.0]
         )  # if subtracting the mean, need the output bias
+    if config.esn.model.input_bias:
+        ESN_dict["input_bias"] = np.array([1.0])
 
     N_washout = pp.get_steps(config.esn.model.washout_time, config.esn.model.network_dt)
     N_val = pp.get_steps(config.esn.val.fold_time, config.esn.model.network_dt)

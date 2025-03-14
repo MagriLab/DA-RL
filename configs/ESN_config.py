@@ -17,10 +17,11 @@ def get_config():
 
     config.model.reservoir_size = 500
     config.model.connectivity = 3
-    config.model.r2_mode = True
+    config.model.r2_mode = False
     config.model.input_weights_mode = "random_sparse"
     config.model.reservoir_weights_mode = "erdos_renyi1"
     config.model.normalize_input = True
+    config.model.input_bias = True
 
     # training configuration
     config.train_episodes = 40
@@ -30,7 +31,7 @@ def get_config():
     config.tikhonov = 1e-7
 
     # validation configuration
-    config.validate = False
+    config.validate = True
 
     config.val = ml_collections.ConfigDict()
 
