@@ -34,6 +34,8 @@ The following experiments can be run:
    ```bash
    python ddpg_with_enkf_esn.py
    ```
+Running an experiment creates a folder in `local_results/` where configurations, model weights and plots (optional) are saved. The results are visualised in the Jupyter notebooks, [`Model-free`](./mf_results.ipynb), [`Model-based Fourier`](./fourier_results.ipynb) and [`Model-based ESN`](./esn_results.ipynb). 
+
 ### Configuration
 
 The experiments can be configured using [`ml_collections`](https://github.com/google/ml_collections). You can find sample config files in the [`configs/`](./configs) directory.
