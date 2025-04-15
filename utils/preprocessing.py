@@ -60,9 +60,9 @@ def create_dataset(
     loop_names=None,
     start_idxs=None,
 ):
-    full_state, y, t = downsample(full_state, y, t=t, new_dt=network_dt)
-    full_state, y, t = discard_transient(
-        full_state, y, t=t, transient_time=transient_time
+    full_state, y, p, t = downsample(full_state, y, p, t=t, new_dt=network_dt)
+    full_state, y, p, t = discard_transient(
+        full_state, y, p, t=t, transient_time=transient_time
     )
 
     # separate into washout and loops

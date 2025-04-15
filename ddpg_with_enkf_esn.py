@@ -61,7 +61,7 @@ flags.DEFINE_bool(
     "Use --make_plots to plot an episode and save it.",
 )
 _CONFIG = config_flags.DEFINE_config_file(
-    "config", "configs/enKF_config.py", "Contains configs to run the experiment"
+    "config", "configs/enKF_config_mb.py", "Contains configs to run the experiment"
 )
 _WANDB = config_flags.DEFINE_config_file(
     "wandb_config", "configs/wandb_config.py", "Contains configs to log to wandb."
@@ -407,8 +407,6 @@ def apply_enKF(m, Af, d, Cdd, M, my_ESN, before_readout, key, rho=1.0):
     # Aa_full = EnKF(m, Af_full, d - my_ESN.observation_bias, Cdd, M, key)
 
     # Aa = after_EnKF(Aa_full, Af)
-
-    # Af2 = before_EnKF(Af)
 
     # STATE AUGMENTATION METHOD
     # Vectorize the before_readout function for the ensemble
@@ -1109,9 +1107,10 @@ def run_experiment(
     )
 
     # set up checkpointers
+    learn_steps = config.episode_steps - config.enKF.observation_starts
     orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
     options = orbax.checkpoint.CheckpointManagerOptions(
-        save_interval_steps=config.total_steps // 5
+        save_interval_steps= 5 * learn_steps
     )
     checkpoint_manager = orbax.checkpoint.CheckpointManager(
         checkpoint_dir, orbax_checkpointer, options=options
@@ -1125,7 +1124,8 @@ def run_experiment(
     if FLAGS.save_checkpoints == True:
         checkpoint = {"actor": actor_state, "critic": critic_state}
         save_args = orbax_utils.save_args_from_target(checkpoint)
-        checkpoint_manager.save(0, checkpoint, save_kwargs={"save_args": save_args})
+        # checkpoint_manager.save(0, checkpoint, save_kwargs={"save_args": save_args})
+        checkpointer.save(checkpoint_dir / str(0), checkpoint, save_args=save_args)
 
     # initialize buffer
     replay_buffer = init_replay_buffer(
@@ -2152,7 +2152,6 @@ def run_experiment(
         config.total_steps - config.learning_starts
     ) // config.episode_steps
     n_eval = config.eval_freq // config.episode_steps
-    learn_steps = config.episode_steps - config.enKF.observation_starts
     metrics = {"train": {}, "eval": {}}
     max_eval_return = -jnp.inf
     for i in range(learn_episodes):
@@ -2480,12 +2479,14 @@ def run_experiment(
         if wandb_run is not None:
             log_metrics_wandb(wandb_run, metrics, step=(i + 1) * learn_steps - 1)
         # checkpoint the model
-        if FLAGS.save_checkpoints == True:
+        if FLAGS.save_checkpoints == True and (i + 1) % 5 == 0:
             checkpoint = {"actor": actor_state, "critic": critic_state}
             save_args = orbax_utils.save_args_from_target(checkpoint)
-            checkpoint_manager.save(
-                (i + 1) * learn_steps, checkpoint, save_kwargs={"save_args": save_args}
-            )
+            # checkpoint_manager.save(
+            #     (i + 1) * learn_steps, checkpoint, save_kwargs={"save_args": save_args}
+            # )
+            checkpointer.save(checkpoint_dir / str((i+1)*learn_steps), checkpoint, save_args=save_args)
+
     final_checkpoint = {"actor": actor_state, "critic": critic_state}
     save_args = orbax_utils.save_args_from_target(final_checkpoint)
     checkpointer.save(final_model_dir, final_checkpoint, save_args=save_args)

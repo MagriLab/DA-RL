@@ -15,7 +15,7 @@ def get_config():
     config.model.network_dt = 5e-2
     config.model.washout_time = 5
 
-    config.model.reservoir_size = 500
+    config.model.reservoir_size = 1000
     config.model.connectivity = 3
     config.model.r2_mode = False
     config.model.input_weights_mode = "random_sparse"
@@ -31,7 +31,7 @@ def get_config():
     config.tikhonov = 1e-7
 
     # validation configuration
-    config.validate = True
+    config.validate = False
 
     config.val = ml_collections.ConfigDict()
 

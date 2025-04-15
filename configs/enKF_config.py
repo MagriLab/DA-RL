@@ -10,11 +10,11 @@ def get_config():
 
     config.seed = 41
 
-    config.total_steps = 10000
+    config.total_steps = 200000
     config.episode_steps = 1000
     config.learning_starts = 5000
     config.eval_freq = 5000
-    config.plot_freq = 5000
+    config.plot_freq = 25000
     config.eval_episodes = 5
 
     config.env = ml_collections.ConfigDict()
@@ -38,13 +38,13 @@ def get_config():
     config.replay_buffer.capacity = 100000
 
     config.enKF = ml_collections.ConfigDict()
-    config.enKF.std_init = 0.1
-    config.enKF.m = 50
-    config.enKF.std_obs = 0.1
+    config.enKF.std_init = 0.0
+    config.enKF.m = 0
+    config.enKF.std_obs = 0.0
     config.enKF.cov_type = "max" # "const", "max", "prop"
-    config.enKF.low_order_N = 64
+    config.enKF.low_order_N = 0
     config.enKF.observation_starts = 0
-    config.enKF.wait_steps = 10
+    config.enKF.wait_steps = 1
     config.enKF.use_reward = "env"
-    config.enKF.inflation_factor = 1.02
+    config.enKF.inflation_factor = 1.0
     return config

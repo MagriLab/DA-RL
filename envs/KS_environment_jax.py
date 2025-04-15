@@ -46,6 +46,9 @@ class KSenv:
         self.dt = 0.05
 
         # Action configuration
+        if isinstance(actuator_locs, int):
+            actuator_locs = ((2 * jnp.pi) / actuator_locs) * jnp.arange(actuator_locs) 
+
         self.action_size = actuator_locs.shape[-1]
         self.actuator_locs = actuator_locs
         self.actuator_scale = actuator_scale
@@ -58,6 +61,9 @@ class KSenv:
         self.initial_amplitude = initial_amplitude
 
         # Observations
+        if isinstance(sensor_locs, int):
+            sensor_locs = ((2 * jnp.pi) / sensor_locs) * jnp.arange(sensor_locs) 
+
         self.observation_inds = [
             int(jnp.round(x)) for x in (self.N / (2 * jnp.pi)) * sensor_locs
         ]

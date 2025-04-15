@@ -53,7 +53,7 @@ flags.DEFINE_bool(
     "Use --make_plots to plot an episode and save it.",
 )
 _CONFIG = config_flags.DEFINE_config_file(
-    "config", "configs/enKF_config.py", "Contains configs to run the experiment"
+    "config", "configs/enKF_config_mb.py", "Contains configs to run the experiment"
 )
 _WANDB = config_flags.DEFINE_config_file(
     "wandb_config", "configs/wandb_config.py", "Contains configs to log to wandb."
